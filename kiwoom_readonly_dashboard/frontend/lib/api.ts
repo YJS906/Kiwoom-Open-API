@@ -7,6 +7,7 @@ import type {
   OrderIntent,
   ReplayResponse,
   StatusPanel,
+  StrategyChartSeries,
   StrategyDashboardSnapshot,
   StrategySymbolDetail,
   TradingConfig,
@@ -53,6 +54,10 @@ export const dashboardApi = {
     requestJson<StrategyDashboardSnapshot>("/api/scanner/refresh"),
   getStrategyDetail: (symbol: string) =>
     requestJson<StrategySymbolDetail>(`/api/strategy/detail/${symbol}`),
+  getStrategyChart: (symbol: string, timeframe: string) =>
+    requestJson<StrategyChartSeries>(
+      `/api/strategy/chart/${symbol}?timeframe=${encodeURIComponent(timeframe)}`
+    ),
   getStrategyConfig: () => requestJson<TradingConfig>("/api/strategy/config"),
   updateStrategyConfig: (payload: Record<string, unknown>) =>
     requestJson<TradingConfig>("/api/strategy/config", {

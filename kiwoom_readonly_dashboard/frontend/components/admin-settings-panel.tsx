@@ -20,6 +20,9 @@ export function AdminSettingsPanel({
 }) {
   const [refreshSeconds, setRefreshSeconds] = useState("45");
   const [triggerTimeframe, setTriggerTimeframe] = useState<"15m" | "5m">("15m");
+  const [breakoutVolumeMultiplier, setBreakoutVolumeMultiplier] = useState("2.0");
+  const [supportReference, setSupportReference] = useState<"breakout" | "ma_fast" | "either" | "both">("either");
+  const [supportTolerancePct, setSupportTolerancePct] = useState("0.02");
   const [autoBuyEnabled, setAutoBuyEnabled] = useState(false);
   const [paperTrading, setPaperTrading] = useState(true);
   const [orderType, setOrderType] = useState<"market" | "limit" | "stop_limit">("market");
@@ -28,6 +31,9 @@ export function AdminSettingsPanel({
     if (!config) return;
     setRefreshSeconds(String(config.scanner.refresh_seconds));
     setTriggerTimeframe(config.strategy.trigger_timeframe);
+    setBreakoutVolumeMultiplier(String(config.strategy.breakout_volume_multiplier));
+    setSupportReference(config.strategy.support_reference);
+    setSupportTolerancePct(String(config.strategy.support_tolerance_pct));
     setAutoBuyEnabled(config.execution.auto_buy_enabled);
     setPaperTrading(config.execution.paper_trading);
     setOrderType(config.execution.order_type);
@@ -55,6 +61,32 @@ export function AdminSettingsPanel({
             <option value="15m">15m</option>
             <option value="5m">5m</option>
           </select>
+        </Field>
+        <Field label="Breakout volume multiplier">
+          <Input
+            value={breakoutVolumeMultiplier}
+            onChange={(event) => setBreakoutVolumeMultiplier(event.target.value)}
+          />
+        </Field>
+        <Field label="Support reference">
+          <select
+            value={supportReference}
+            onChange={(event) =>
+              setSupportReference(event.target.value as "breakout" | "ma_fast" | "either" | "both")
+            }
+            className="w-full rounded-xl border border-border bg-panelMuted px-3 py-2 text-sm text-text outline-none"
+          >
+            <option value="breakout">breakout</option>
+            <option value="ma_fast">ma_fast</option>
+            <option value="either">either</option>
+            <option value="both">both</option>
+          </select>
+        </Field>
+        <Field label="Support tolerance pct">
+          <Input
+            value={supportTolerancePct}
+            onChange={(event) => setSupportTolerancePct(event.target.value)}
+          />
         </Field>
         <Field label="Order type">
           <select
@@ -87,7 +119,12 @@ export function AdminSettingsPanel({
           onClick={() =>
             onSave({
               scanner: { refresh_seconds: Number(refreshSeconds) || 45 },
-              strategy: { trigger_timeframe: triggerTimeframe },
+              strategy: {
+                trigger_timeframe: triggerTimeframe,
+                breakout_volume_multiplier: Number(breakoutVolumeMultiplier) || 2.0,
+                support_reference: supportReference,
+                support_tolerance_pct: Number(supportTolerancePct) || 0.02
+              },
               execution: {
                 auto_buy_enabled: autoBuyEnabled,
                 paper_trading: paperTrading,

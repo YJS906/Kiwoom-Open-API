@@ -22,6 +22,7 @@ from app.models.trading import (
     SessionState,
     SignalEvent,
     StrategyDashboardSnapshot,
+    StrategyChartSeries,
     StrategyDecision,
     StrategyRuntimeState,
     StrategyStatus,
@@ -108,15 +109,34 @@ class SignalEngine:
         """Return the latest snapshot, refreshing lazily if needed."""
 
         if self.state.session.last_scan_at is None:
-            return await self.refresh_now()
+            try:
+                return await self.refresh_now()
+            except Exception as exc:
+                # Keep the dashboard usable even when Kiwoom throttles the first scan.
+                self._remember_error(str(exc))
+                self._status = StrategyStatus(
+                    connected=False,
+                    status="degraded",
+                    last_updated_at=now_kr(),
+                    detail=str(exc),
+                )
+                self.logger.warning(
+                    "Returning an empty/stale strategy snapshot because the initial refresh failed: %s",
+                    exc,
+                )
+                return self._build_snapshot()
         return self._build_snapshot()
 
-    async def get_symbol_detail(self, symbol: str) -> StrategySymbolDetail:
+    async def get_symbol_detail(self, symbol: str, include_charts: bool = False) -> StrategySymbolDetail:
         """Return strategy details and charts for a single symbol."""
 
         normalized = symbol.strip().upper()[-6:]
         candidate = self.state.candidates.get(normalized)
-        charts = await self.bar_builder.get_strategy_bundle(normalized)
+        charts = (
+            await self.bar_builder.get_strategy_bundle(normalized)
+            if include_charts
+            else {"daily": [], "60m": [], "15m": [], "5m": [], "weekly": []}
+        )
         decision = self._last_decisions.get(normalized)
         explanation_cards: list[str] = []
         if decision:
@@ -133,6 +153,13 @@ class SignalEngine:
             levels=decision.annotations if decision else [],
             explanation_cards=explanation_cards,
         )
+
+    async def get_chart_series(self, symbol: str, timeframe: str) -> StrategyChartSeries:
+        """Return one strategy timeframe on demand for the chart panel."""
+
+        normalized = symbol.strip().upper()[-6:]
+        bars = await self.bar_builder.get_bars(normalized, timeframe, limit=None)  # type: ignore[arg-type]
+        return StrategyChartSeries(symbol=normalized, timeframe=timeframe, bars=bars)
 
     async def replay(self, symbol: str) -> ReplayResponse:
         """Minimal replay endpoint using the daily filter over history."""
@@ -489,6 +516,7 @@ class SignalEngine:
             session=self.state.session,
             config=self.config,
             status=self._status,
+            scanner_source=self.scanner.last_source,
         )
 
     def _trim_state(self) -> None:
@@ -517,4 +545,3 @@ class SignalEngine:
             json.dumps(self.state.model_dump(mode="json"), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-

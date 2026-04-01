@@ -28,7 +28,7 @@ class TTLCache:
         item = self._data.get(key)
         if item is None:
             return None
-        if item.expires_at < time.monotonic():
+        if item.expires_at <= time.monotonic():
             self._data.pop(key, None)
             return None
         return item.value
@@ -60,4 +60,3 @@ class TTLCache:
             value = await factory()
             self.set(key, value, ttl_seconds)
             return value
-

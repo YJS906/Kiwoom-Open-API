@@ -23,6 +23,12 @@ export function StrategyParamsPanel({ snapshot }: { snapshot: StrategyDashboardS
             <Metric label="Condition" value={snapshot.config.scanner.condition_name} />
             <Metric label="Refresh" value={`${snapshot.config.scanner.refresh_seconds}s`} />
             <Metric label="Trigger TF" value={snapshot.config.strategy.trigger_timeframe} />
+            <Metric label="Breakout Vol" value={`${snapshot.config.strategy.breakout_volume_multiplier.toFixed(1)}x`} />
+            <Metric label="Support Ref" value={snapshot.config.strategy.support_reference} />
+            <Metric
+              label="Support Tol"
+              value={`${(snapshot.config.strategy.support_tolerance_pct * 100).toFixed(1)}%`}
+            />
             <Metric label="Order Type" value={snapshot.config.execution.order_type} />
             <Metric label="Stop Loss" value={`${(snapshot.config.risk.stop_loss_pct * 100).toFixed(1)}%`} />
             <Metric label="Take Profit" value={`${snapshot.config.risk.take_profit_r_multiple.toFixed(1)}R`} />
@@ -50,4 +56,3 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-

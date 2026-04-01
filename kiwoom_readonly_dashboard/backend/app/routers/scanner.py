@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 
-from app.models.trading import CandidateStock, StrategyDashboardSnapshot
+from app.models.trading import CandidateStock, ConditionDefinition, StrategyDashboardSnapshot
 
 
 router = APIRouter(prefix="/api/scanner", tags=["scanner"])
@@ -30,9 +30,15 @@ async def get_candidates(
     return [item for item in snapshot.candidates if item.state == state]
 
 
+@router.get("/conditions", response_model=list[ConditionDefinition])
+async def get_conditions(request: Request) -> list[ConditionDefinition]:
+    """Return available Hero4 condition-search definitions."""
+
+    return await request.app.state.condition_search.list_conditions()
+
+
 @router.post("/refresh", response_model=StrategyDashboardSnapshot)
 async def refresh_scanner(request: Request) -> StrategyDashboardSnapshot:
     """Force an immediate refresh of the strategy snapshot."""
 
     return await request.app.state.signal_engine.refresh_now()
-

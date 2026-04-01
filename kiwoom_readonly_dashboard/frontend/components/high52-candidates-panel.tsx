@@ -7,13 +7,17 @@ import { Card } from "@/components/ui/card";
 
 export function High52CandidatesPanel({
   items,
+  source,
   selectedSymbol,
   onSelect
 }: {
   items: CandidateStock[];
+  source?: string | null;
   selectedSymbol: string | null;
   onSelect: (symbol: string) => void;
 }) {
+  const usingFallback = source === "fallback_symbols";
+
   return (
     <Card className="overflow-hidden">
       <div className="border-b border-border/80 px-5 py-4">
@@ -21,9 +25,18 @@ export function High52CandidatesPanel({
           <Radar className="h-4 w-4 text-accent" />
           <div>
             <h2 className="text-sm font-semibold text-text">52주 신고가 후보군</h2>
-            <p className="mt-1 text-xs text-muted">조건검색 또는 안전 fallback으로 추린 후보 목록</p>
+            <p className="mt-1 text-xs text-muted">
+              조건검색 기반으로 집계한 실시간 감시 후보 목록
+              {source ? ` · source=${source}` : ""}
+            </p>
           </div>
         </div>
+        {usingFallback ? (
+          <div className="mt-3 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-yellow-100">
+            현재는 영웅문4 조건검색식이 API에서 확인되지 않아 fallback 종목만 표시 중입니다.
+            영웅문4에서 저장한 조건식 이름이 <span className="font-semibold">52주 신고가</span> 와 같은지 확인해 주세요.
+          </div>
+        ) : null}
       </div>
       <div className="max-h-[340px] overflow-auto">
         {items.length === 0 ? (
@@ -67,4 +80,3 @@ export function High52CandidatesPanel({
     </Card>
   );
 }
-

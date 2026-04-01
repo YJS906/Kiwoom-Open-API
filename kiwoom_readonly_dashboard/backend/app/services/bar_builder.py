@@ -52,11 +52,11 @@ class BarBuilderService:
     async def get_strategy_bundle(self, symbol: str) -> dict[str, list[TradeBar]]:
         """Fetch the bundle used by the pullback strategy and the detail panel."""
 
-        daily = await self.get_bars(symbol, "daily", limit=260)
-        bars_60m = await self.get_bars(symbol, "60m", limit=80)
-        bars_15m = await self.get_bars(symbol, "15m", limit=160)
-        bars_5m = await self.get_bars(symbol, "5m", limit=200)
-        weekly = await self.get_bars(symbol, "weekly", limit=60)
+        daily = await self._get_optional_bars(symbol, "daily", limit=260)
+        bars_60m = await self._get_optional_bars(symbol, "60m", limit=80)
+        bars_15m = await self._get_optional_bars(symbol, "15m", limit=160)
+        bars_5m = await self._get_optional_bars(symbol, "5m", limit=200)
+        weekly = await self._get_optional_bars(symbol, "weekly", limit=60)
         return {
             "daily": daily,
             "60m": bars_60m,
@@ -64,6 +64,25 @@ class BarBuilderService:
             "5m": bars_5m,
             "weekly": weekly,
         }
+
+    async def _get_optional_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        limit: int | None = None,
+    ) -> list[TradeBar]:
+        """Return one timeframe, but keep the detail panel alive on partial failures."""
+
+        try:
+            return await self.get_bars(symbol, timeframe, limit=limit)
+        except Exception as exc:
+            self.logger.warning(
+                "Returning an empty %s chart for %s because the upstream fetch failed: %s",
+                timeframe,
+                symbol,
+                exc,
+            )
+            return []
 
     @staticmethod
     def _to_trade_bar(timeframe: Timeframe, row) -> TradeBar:
@@ -108,4 +127,3 @@ def aggregate_bars(bars: list[TradeBar], target_minutes: int) -> list[TradeBar]:
             )
         )
     return aggregated
-

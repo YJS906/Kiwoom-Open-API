@@ -40,11 +40,16 @@ class StrategyConfig(BaseModel):
     recent_breakout_days: int = 20
     daily_ma_fast: int = 20
     daily_ma_slow: int = 60
+    breakout_volume_multiplier: float = 2.0
+    breakout_volume_lookback_days: int = 20
     pullback_min_ratio: float = 0.30
     pullback_max_ratio: float = 0.50
     volume_dryup_ratio: float = 0.70
+    support_reference: Literal["breakout", "ma_fast", "either", "both"] = "either"
+    support_tolerance_pct: float = 0.02
     trigger_timeframe: Literal["15m", "5m"] = "15m"
     use_vwap: bool = True
+    require_bullish_reversal_candle: bool = True
     min_daily_bars: int = 120
     min_intraday_bars: int = 40
     breakout_lookback_bars_60m: int = 18
@@ -322,6 +327,7 @@ class StrategyDashboardSnapshot(BaseModel):
     session: SessionState
     config: TradingConfig
     status: StrategyStatus
+    scanner_source: str = "unknown"
     updated_at: datetime = Field(default_factory=now_kr)
 
 
@@ -335,6 +341,15 @@ class StrategySymbolDetail(BaseModel):
     charts: dict[str, list[TradeBar]] = Field(default_factory=dict)
     levels: list[PriceLevel] = Field(default_factory=list)
     explanation_cards: list[str] = Field(default_factory=list)
+    updated_at: datetime = Field(default_factory=now_kr)
+
+
+class StrategyChartSeries(BaseModel):
+    """Single strategy chart payload loaded on demand by timeframe."""
+
+    symbol: str
+    timeframe: Timeframe
+    bars: list[TradeBar] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=now_kr)
 
 
@@ -365,4 +380,3 @@ class AdminConfigPatch(BaseModel):
     risk: dict[str, Any] = Field(default_factory=dict)
     execution: dict[str, Any] = Field(default_factory=dict)
     session: dict[str, Any] = Field(default_factory=dict)
-

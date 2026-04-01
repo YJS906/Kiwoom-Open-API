@@ -11,11 +11,16 @@ strategy:
   recent_breakout_days: 20
   daily_ma_fast: 20
   daily_ma_slow: 60
+  breakout_volume_multiplier: 2.0
+  breakout_volume_lookback_days: 20
   pullback_min_ratio: 0.30
   pullback_max_ratio: 0.50
   volume_dryup_ratio: 0.70
+  support_reference: "either"
+  support_tolerance_pct: 0.02
   trigger_timeframe: "15m"
   use_vwap: true
+  require_bullish_reversal_candle: true
   min_daily_bars: 120
   min_intraday_bars: 40
   breakout_lookback_bars_60m: 18
@@ -57,4 +62,3 @@ session:
 admin:
   enable_runtime_overrides: true
   replay_default_days: 60
-

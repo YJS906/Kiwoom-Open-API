@@ -10,12 +10,13 @@ import {
   createChart
 } from "lightweight-charts";
 
+import { dashboardApi } from "@/lib/api";
 import type { StrategySymbolDetail, StrategyTimeframe, TradeBar } from "@/types/dashboard";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
-const TIMEFRAMES: StrategyTimeframe[] = ["daily", "60m", "15m", "5m"];
+const TIMEFRAMES: StrategyTimeframe[] = ["weekly", "daily", "60m", "15m", "5m"];
 
 export function StrategyChartPanel({
   detail,
@@ -25,14 +26,50 @@ export function StrategyChartPanel({
   loading: boolean;
 }) {
   const [timeframe, setTimeframe] = useState<StrategyTimeframe>("daily");
+  const [bars, setBars] = useState<TradeBar[]>([]);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
 
-  const bars = useMemo<TradeBar[]>(() => detail?.charts?.[timeframe] ?? [], [detail, timeframe]);
+  useEffect(() => {
+    if (!detail?.symbol) {
+      setBars([]);
+      setChartError(null);
+      return;
+    }
+
+    let active = true;
+    setChartLoading(true);
+
+    const loadChart = async () => {
+      try {
+        const response = await dashboardApi.getStrategyChart(detail.symbol, timeframe);
+        if (!active) return;
+        setBars(response.bars ?? []);
+        setChartError(null);
+      } catch (error) {
+        if (!active) return;
+        setBars([]);
+        setChartError(error instanceof Error ? error.message : "차트 데이터를 불러오지 못했습니다.");
+      } finally {
+        if (active) {
+          setChartLoading(false);
+        }
+      }
+    };
+
+    void loadChart();
+    return () => {
+      active = false;
+    };
+  }, [detail?.symbol, timeframe]);
+
+  const effectiveBars = useMemo(() => bars, [bars]);
 
   useEffect(() => {
-    if (!containerRef.current || !bars.length) {
+    if (!containerRef.current || !effectiveBars.length) {
       return;
     }
 
@@ -75,7 +112,7 @@ export function StrategyChartPanel({
     });
 
     candleSeries.setData(
-      bars.map((bar) => ({
+      effectiveBars.map((bar) => ({
         time: toChartTime(bar.time),
         open: bar.open,
         high: bar.high,
@@ -84,7 +121,7 @@ export function StrategyChartPanel({
       }))
     );
     volumeSeries.setData(
-      bars.map(
+      effectiveBars.map(
         (bar): HistogramData<Time> => ({
           time: toChartTime(bar.time),
           value: bar.volume,
@@ -127,14 +164,16 @@ export function StrategyChartPanel({
       chartRef.current = null;
       priceLinesRef.current = [];
     };
-  }, [bars, detail]);
+  }, [effectiveBars, detail]);
+
+  const isLoading = loading || chartLoading;
 
   return (
     <Card className="p-5">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-sm font-semibold text-text">전략 멀티타임프레임 차트</h2>
-          <p className="mt-1 text-xs text-muted">일봉, 60분봉, 15분봉, 5분봉을 한 패널에서 전환합니다.</p>
+          <h2 className="text-sm font-semibold text-text">전략 멀티 타임프레임 차트</h2>
+          <p className="mt-1 text-xs text-muted">주봉, 일봉, 60분봉, 15분봉, 5분봉을 탭별로 불러옵니다.</p>
         </div>
         <div className="flex gap-2 rounded-xl border border-border/70 bg-panelMuted/60 p-1">
           {TIMEFRAMES.map((item) => (
@@ -148,14 +187,21 @@ export function StrategyChartPanel({
           ))}
         </div>
       </div>
-      {loading ? (
+      {isLoading ? (
         <Skeleton className="h-[420px] w-full rounded-2xl" />
-      ) : bars.length ? (
+      ) : chartError ? (
+        <div className="flex h-[420px] items-center justify-center rounded-2xl border border-dashed border-danger/40 text-sm text-red-200">
+          {chartError}
+        </div>
+      ) : effectiveBars.length ? (
         <div className="space-y-4">
           <div ref={containerRef} className="w-full overflow-hidden rounded-2xl" />
           <div className="flex flex-wrap gap-2 text-xs text-muted">
             {(detail?.levels ?? []).map((level) => (
-              <div key={`${level.kind}-${level.label}`} className="rounded-full border border-border/70 bg-panelMuted/60 px-3 py-1">
+              <div
+                key={`${level.kind}-${level.label}`}
+                className="rounded-full border border-border/70 bg-panelMuted/60 px-3 py-1"
+              >
                 {level.label}: {level.price.toLocaleString("ko-KR")}
               </div>
             ))}
@@ -177,4 +223,3 @@ function toChartTime(value: string): Time {
   const [year, month, day] = value.split("-").map(Number);
   return { year, month, day } as Time;
 }
-

@@ -46,10 +46,7 @@ class ConditionSearchService:
     async def list_conditions(self) -> list[ConditionDefinition]:
         """Fetch the user's Hero4 condition list using ka10171."""
 
-        if self._ws_conflicts_with_market_stream():
-            return list(self._cached_conditions)
-
-        response = await self._send_single_message({"trnm": "CNSRLST"}, expected_trnm="CNSRLST")
+        response = await self._request_conditions_payload({"trnm": "CNSRLST"}, expected_trnm="CNSRLST")
         definitions = parse_condition_definitions(response.get("data", []))
         self._cached_conditions = definitions
         self.last_updated_at = now_kr()
@@ -60,18 +57,24 @@ class ConditionSearchService:
         """Resolve a condition name to its sequence number."""
 
         conditions = await self.list_conditions()
+        normalized_target = normalize_condition_name(condition_name)
         for item in conditions:
             if item.name == condition_name:
                 return item
+        for item in conditions:
+            if normalize_condition_name(item.name) == normalized_target:
+                return item
+        for item in conditions:
+            normalized_name = normalize_condition_name(item.name)
+            if "52주" in normalized_target and "신고가" in normalized_target:
+                if "52주" in normalized_name and "신고가" in normalized_name:
+                    return item
         return None
 
     async def search_condition_once(self, seq: str, stex_tp: str = "K") -> list[dict[str, Any]]:
         """Run the official condition-search request (ka10172) once."""
 
-        if self._ws_conflicts_with_market_stream():
-            return list(self._cached_rows)
-
-        response = await self._send_single_message(
+        response = await self._request_conditions_payload(
             {"trnm": "CNSRREQ", "seq": seq, "search_type": "0", "stex_tp": stex_tp},
             expected_trnm="CNSRREQ",
         )
@@ -90,6 +93,34 @@ class ConditionSearchService:
         """Return recent condition-search errors."""
 
         return list(self._recent_errors)
+
+    async def _request_conditions_payload(self, payload: dict[str, Any], expected_trnm: str) -> dict[str, Any]:
+        """Use the shared realtime websocket when available, otherwise open a temporary one."""
+
+        if self.market_ws_service is not None:
+            connected, status, _, _ = self.market_ws_service.get_connection_state()
+            if connected:
+                try:
+                    if expected_trnm == "CNSRLST":
+                        return await self.market_ws_service.request_condition_list()
+                    return await self.market_ws_service.request_condition_search(str(payload.get("seq", "")))
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    self._recent_errors.append(self.last_error)
+                    self._recent_errors = self._recent_errors[-10:]
+                    self.logger.warning("Shared websocket condition request failed: %s", exc)
+                    if self._cached_rows or self._cached_conditions:
+                        if expected_trnm == "CNSRLST":
+                            return {"trnm": "CNSRLST", "return_code": "0", "data": [item.model_dump() for item in self._cached_conditions]}
+                        return {"trnm": "CNSRREQ", "return_code": "0", "data": self._cached_rows}
+
+            if status not in {"idle", "disconnected"}:
+                if expected_trnm == "CNSRLST" and self._cached_conditions:
+                    return {"trnm": "CNSRLST", "return_code": "0", "data": [item.model_dump() for item in self._cached_conditions]}
+                if expected_trnm == "CNSRREQ" and self._cached_rows:
+                    return {"trnm": "CNSRREQ", "return_code": "0", "data": self._cached_rows}
+
+        return await self._send_single_message(payload, expected_trnm=expected_trnm)
 
     async def _send_single_message(self, payload: dict[str, Any], expected_trnm: str) -> dict[str, Any]:
         token = await self.auth_service.get_token()
@@ -148,6 +179,12 @@ class ConditionSearchService:
                 self._recent_errors = self._recent_errors[-10:]
             return True
         return False
+
+
+def normalize_condition_name(value: str) -> str:
+    """Normalize condition names for robust matching."""
+
+    return "".join(str(value or "").lower().split())
 
 
 def parse_condition_definitions(values: Iterable[Any]) -> list[ConditionDefinition]:
@@ -210,4 +247,3 @@ def parse_condition_result_rows(values: Iterable[Any]) -> list[dict[str, Any]]:
         if parsed and parsed["symbol"]:
             rows.append(parsed)
     return rows
-

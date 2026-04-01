@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import html
+import json
 import logging
 import re
+import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -41,6 +46,19 @@ class KiwoomResponse:
     continuation: bool = False
 
 
+@dataclass
+class AccountSnapshot:
+    """Combined account snapshot so summary/holdings share one Kiwoom fetch."""
+
+    total_evaluation_amount: int
+    total_profit_loss: int
+    total_profit_rate: float
+    estimated_assets: int
+    deposit: int
+    holdings_rows: list[dict[str, Any]]
+    updated_at: datetime
+
+
 class KiwoomClientService:
     """Read-only Kiwoom REST service for dashboard queries."""
 
@@ -58,6 +76,11 @@ class KiwoomClientService:
         self.last_error: str | None = None
         self.last_updated_at: datetime | None = None
         self._recent_errors: list[str] = []
+        self._last_account_snapshot: AccountSnapshot | None = None
+        self._stock_universe_source = "uninitialized"
+        self._chart_stale_ttl_seconds = max(self.settings.kiwoom_chart_cache_ttl_seconds * 12, 1800)
+        self._request_lock = asyncio.Lock()
+        self._last_request_monotonic = 0.0
 
     async def verify_account(self) -> list[str]:
         """Verify the configured account exists for the current app key."""
@@ -74,97 +97,106 @@ class KiwoomClientService:
     async def get_account_numbers(self) -> list[str]:
         """Call ka00001."""
 
-        result = await self._post("/api/dostk/acnt", "ka00001", {})
-        value = result.body.get("acctNo")
-        if not value:
-            return []
-        if isinstance(value, list):
-            return [str(item) for item in value]
-        return [chunk.strip() for chunk in re.split(r"[;,]", str(value)) if chunk.strip()]
+        async def _factory() -> list[str]:
+            result = await self._post("/api/dostk/acnt", "ka00001", {})
+            value = result.body.get("acctNo")
+            if not value:
+                return []
+            if isinstance(value, list):
+                return [str(item) for item in value]
+            return [chunk.strip() for chunk in re.split(r"[;,]", str(value)) if chunk.strip()]
+
+        return await self.cache.get_or_set(
+            "account_numbers",
+            max(self.settings.kiwoom_account_cache_ttl_seconds, 300),
+            _factory,
+        )
 
     async def get_account_summary(self) -> AccountSummary:
         """Combine kt00001 and kt00018 into one summary payload."""
 
-        async def _factory() -> AccountSummary:
-            deposit_result = await self._post("/api/dostk/acnt", "kt00001", {"qry_tp": "2"})
-            snapshot_result = await self._post(
-                "/api/dostk/acnt",
-                "kt00018",
-                {"qry_tp": "1", "dmst_stex_tp": "KRX"},
-            )
-            holdings = snapshot_result.body.get("acnt_evlt_remn_indv_tot", []) or []
-            return AccountSummary(
-                total_evaluation_amount=safe_abs_int(snapshot_result.body.get("tot_evlt_amt")),
-                total_profit_loss=safe_int(snapshot_result.body.get("tot_evlt_pl")),
-                total_profit_rate=safe_float(snapshot_result.body.get("tot_prft_rt")),
-                holdings_count=len([row for row in holdings if safe_abs_int(row.get("rmnd_qty")) > 0]),
-                deposit=safe_abs_int(deposit_result.body.get("entr")),
-                estimated_assets=safe_abs_int(snapshot_result.body.get("prsm_dpst_aset_amt")),
-                updated_at=now_kr(),
-            )
-
-        return await self.cache.get_or_set(
-            "account_summary",
-            self.settings.kiwoom_account_cache_ttl_seconds,
-            _factory,
+        snapshot = await self._get_account_snapshot()
+        return AccountSummary(
+            total_evaluation_amount=snapshot.total_evaluation_amount,
+            total_profit_loss=snapshot.total_profit_loss,
+            total_profit_rate=snapshot.total_profit_rate,
+            holdings_count=len(
+                [row for row in snapshot.holdings_rows if safe_abs_int(row.get("rmnd_qty")) > 0]
+            ),
+            deposit=snapshot.deposit,
+            estimated_assets=snapshot.estimated_assets,
+            updated_at=snapshot.updated_at,
         )
 
     async def get_holdings(self) -> HoldingsResponse:
         """Return holdings table rows from kt00018."""
 
-        async def _factory() -> HoldingsResponse:
-            result = await self._post(
-                "/api/dostk/acnt",
-                "kt00018",
-                {"qry_tp": "1", "dmst_stex_tp": "KRX"},
+        snapshot = await self._get_account_snapshot()
+        items = [
+            HoldingItem(
+                symbol=normalize_symbol(str(row.get("stk_cd", ""))),
+                name=str(row.get("stk_nm", "")),
+                quantity=safe_abs_int(row.get("rmnd_qty")),
+                available_quantity=safe_abs_int(row.get("trde_able_qty")),
+                average_price=safe_abs_int(row.get("pur_pric")),
+                current_price=safe_abs_int(row.get("cur_prc")),
+                evaluation_profit_loss=safe_int(row.get("evltv_prft")),
+                profit_rate=safe_float(row.get("prft_rt")),
             )
-            rows = result.body.get("acnt_evlt_remn_indv_tot", []) or []
-            items = [
-                HoldingItem(
-                    symbol=normalize_symbol(str(row.get("stk_cd", ""))),
-                    name=str(row.get("stk_nm", "")),
-                    quantity=safe_abs_int(row.get("rmnd_qty")),
-                    available_quantity=safe_abs_int(row.get("trde_able_qty")),
-                    average_price=safe_abs_int(row.get("pur_pric")),
-                    current_price=safe_abs_int(row.get("cur_prc")),
-                    evaluation_profit_loss=safe_int(row.get("evltv_prft")),
-                    profit_rate=safe_float(row.get("prft_rt")),
-                )
-                for row in rows
-                if safe_abs_int(row.get("rmnd_qty")) > 0
-            ]
-            return HoldingsResponse(items=items, updated_at=now_kr())
-
-        return await self.cache.get_or_set(
-            "account_holdings",
-            self.settings.kiwoom_account_cache_ttl_seconds,
-            _factory,
-        )
+            for row in snapshot.holdings_rows
+            if safe_abs_int(row.get("rmnd_qty")) > 0
+        ]
+        return HoldingsResponse(items=items, updated_at=snapshot.updated_at)
 
     async def get_stock_universe(self) -> list[StockSearchItem]:
         """Fetch a cached stock universe from ka10099."""
 
         async def _factory() -> list[StockSearchItem]:
+            persisted = self._load_persisted_stock_universe(max_age_seconds=self.settings.kiwoom_symbol_cache_ttl_seconds)
+            if persisted:
+                self._stock_universe_source = "runtime_cache"
+                return persisted
+
             markets = ["0", "10", "8"]
             items: dict[str, StockSearchItem] = {}
-            for market_code in markets:
-                result = await self._post(
-                    "/api/dostk/stkinfo",
-                    "ka10099",
-                    {"mrkt_tp": market_code},
-                )
-                for row in result.body.get("list", []) or []:
-                    symbol = normalize_symbol(str(row.get("code", "")))
-                    if not symbol:
-                        continue
-                    items[symbol] = StockSearchItem(
-                        symbol=symbol,
-                        name=str(row.get("name", "")),
-                        market_code=str(row.get("marketCode", market_code)),
-                        market_name=str(row.get("marketName", "")),
-                        last_price=safe_abs_int(row.get("lastPrice")) or None,
+            try:
+                for market_code in markets:
+                    result = await self._post(
+                        "/api/dostk/stkinfo",
+                        "ka10099",
+                        {"mrkt_tp": market_code},
                     )
-            return sorted(items.values(), key=lambda item: (item.market_name, item.name))
+                    for row in result.body.get("list", []) or []:
+                        symbol = normalize_symbol(str(row.get("code", "")))
+                        if not symbol:
+                            continue
+                        items[symbol] = StockSearchItem(
+                            symbol=symbol,
+                            name=str(row.get("name", "")),
+                            market_code=str(row.get("marketCode", market_code)),
+                            market_name=str(row.get("marketName", "")),
+                            last_price=safe_abs_int(row.get("lastPrice")) or None,
+                        )
+                universe = sorted(items.values(), key=lambda item: (item.market_name, item.name))
+                if universe:
+                    self._persist_stock_universe(universe)
+                    self._stock_universe_source = "kiwoom_rest"
+                    return universe
+            except KiwoomRequestError as exc:
+                self.logger.warning("Kiwoom stock universe fetch failed, falling back: %s", exc)
+
+            persisted_any = self._load_persisted_stock_universe(max_age_seconds=None)
+            if persisted_any:
+                self._stock_universe_source = "runtime_cache_stale"
+                return persisted_any
+
+            kind_universe = await self._fetch_kind_stock_universe()
+            if kind_universe:
+                self._stock_universe_source = "krx_kind_fallback"
+                self._persist_stock_universe(kind_universe)
+                return kind_universe
+
+            raise KiwoomRequestError("Unable to build the stock universe for search.")
 
         return await self.cache.get_or_set(
             "stock_universe",
@@ -249,33 +281,78 @@ class KiwoomClientService:
             asks: list[OrderbookLevel] = []
             bids: list[OrderbookLevel] = []
             for level in range(1, 6):
+                suffixes = rest_orderbook_suffixes(level)
+                ask_price_keys = flatten_keys(
+                    *[
+                        [
+                            f"sel_{suffix}_pre_bid",
+                            f"sel_{level}",
+                            f"ask_{level}",
+                            f"ask{level}",
+                        ]
+                        for suffix in suffixes
+                    ]
+                )
+                ask_qty_keys = flatten_keys(
+                    *[
+                        [
+                            f"sel_{suffix}_pre_req",
+                            f"sel_{level}_req",
+                            f"ask_qty_{level}",
+                            f"askqty{level}",
+                        ]
+                        for suffix in suffixes
+                    ]
+                )
+                bid_price_keys = flatten_keys(
+                    *[
+                        [
+                            f"buy_{suffix}_pre_bid",
+                            f"buy_{level}",
+                            f"bid_{level}",
+                            f"bid{level}",
+                        ]
+                        for suffix in suffixes
+                    ]
+                )
+                bid_qty_keys = flatten_keys(
+                    *[
+                        [
+                            f"buy_{suffix}_pre_req",
+                            f"buy_{level}_req",
+                            f"bid_qty_{level}",
+                            f"bidqty{level}",
+                        ]
+                        for suffix in suffixes
+                    ]
+                )
+                if level == 1:
+                    ask_price_keys = ["sel_fpr_bid", *ask_price_keys]
+                    ask_qty_keys = ["sel_fpr_req", *ask_qty_keys]
+                    bid_price_keys = ["buy_fpr_bid", *bid_price_keys]
+                    bid_qty_keys = ["buy_fpr_req", *bid_qty_keys]
                 asks.append(
                     OrderbookLevel(
                         price=pick_first_int(
                             body,
-                            [
-                                f"sel_{ordinal(level)}_pre_bid",
-                                f"sel_{level}",
-                                f"ask_{level}",
-                                f"ask{level}",
-                            ],
+                            ask_price_keys,
                         ),
                         quantity=pick_first_int(
                             body,
-                            [
-                                f"sel_{ordinal(level)}_pre_req",
-                                f"sel_{level}_req",
-                                f"ask_qty_{level}",
-                                f"askqty{level}",
-                            ],
+                            ask_qty_keys,
                         ),
                         delta=pick_first_optional_int(
                             body,
-                            [
-                                f"sel_{ordinal(level)}_pre_req_pre",
-                                f"sel_{level}_delta",
-                                f"ask_delta_{level}",
-                            ],
+                            flatten_keys(
+                                *[
+                                    [
+                                        f"sel_{suffix}_pre_req_pre",
+                                        f"sel_{level}_delta",
+                                        f"ask_delta_{level}",
+                                    ]
+                                    for suffix in suffixes
+                                ]
+                            ),
                         ),
                     )
                 )
@@ -283,29 +360,24 @@ class KiwoomClientService:
                     OrderbookLevel(
                         price=pick_first_int(
                             body,
-                            [
-                                f"buy_{ordinal(level)}_pre_bid",
-                                f"buy_{level}",
-                                f"bid_{level}",
-                                f"bid{level}",
-                            ],
+                            bid_price_keys,
                         ),
                         quantity=pick_first_int(
                             body,
-                            [
-                                f"buy_{ordinal(level)}_pre_req",
-                                f"buy_{level}_req",
-                                f"bid_qty_{level}",
-                                f"bidqty{level}",
-                            ],
+                            bid_qty_keys,
                         ),
                         delta=pick_first_optional_int(
                             body,
-                            [
-                                f"buy_{ordinal(level)}_pre_req_pre",
-                                f"buy_{level}_delta",
-                                f"bid_delta_{level}",
-                            ],
+                            flatten_keys(
+                                *[
+                                    [
+                                        f"buy_{suffix}_pre_req_pre",
+                                        f"buy_{level}_delta",
+                                        f"bid_delta_{level}",
+                                    ]
+                                    for suffix in suffixes
+                                ]
+                            ),
                         ),
                     )
                 )
@@ -359,31 +431,61 @@ class KiwoomClientService:
 
     async def get_daily_bars(self, symbol: str, limit: int = 260) -> list[ChartBar]:
         """Return daily bars from ka10081 with continuation support."""
+        stale_key = f"chartbars-stale:daily:{normalize_symbol(symbol)}"
+        try:
+            rows = await self._collect_chart_rows_with_symbol_fallback(
+                "/api/dostk/chart",
+                "ka10081",
+                symbol,
+                {"base_dt": now_kr().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
+                "stk_dt_pole_chart_qry",
+            )
+            bars = self._parse_daily_rows(rows)
+            bars.sort(key=lambda bar: bar.time)
+            if bars:
+                self.cache.set(stale_key, bars, self._chart_stale_ttl_seconds)
+                return bars[-limit:]
+        except KiwoomRequestError as exc:
+            stale = self.cache.get(stale_key)
+            if stale:
+                self.logger.warning("Using stale daily chart for %s after Kiwoom error: %s", symbol, exc)
+                return stale[-limit:]
+            raise
 
-        rows = await self._collect_chart_rows_with_symbol_fallback(
-            "/api/dostk/chart",
-            "ka10081",
-            symbol,
-            {"base_dt": now_kr().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
-            "stk_dt_pole_chart_qry",
-        )
-        bars = self._parse_daily_rows(rows)
-        bars.sort(key=lambda bar: bar.time)
-        return bars[-limit:]
+        stale = self.cache.get(stale_key)
+        if stale:
+            self.logger.warning("Using stale daily chart for %s because fresh response was empty.", symbol)
+            return stale[-limit:]
+        return []
 
     async def get_weekly_bars(self, symbol: str, limit: int = 104) -> list[ChartBar]:
         """Return weekly bars from ka10082."""
+        stale_key = f"chartbars-stale:weekly:{normalize_symbol(symbol)}"
+        try:
+            rows = await self._collect_chart_rows_with_symbol_fallback(
+                "/api/dostk/chart",
+                "ka10082",
+                symbol,
+                {"base_dt": now_kr().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
+                "stk_stk_pole_chart_qry",
+            )
+            bars = self._parse_daily_rows(rows)
+            bars.sort(key=lambda bar: bar.time)
+            if bars:
+                self.cache.set(stale_key, bars, self._chart_stale_ttl_seconds)
+                return bars[-limit:]
+        except KiwoomRequestError as exc:
+            stale = self.cache.get(stale_key)
+            if stale:
+                self.logger.warning("Using stale weekly chart for %s after Kiwoom error: %s", symbol, exc)
+                return stale[-limit:]
+            raise
 
-        rows = await self._collect_chart_rows_with_symbol_fallback(
-            "/api/dostk/chart",
-            "ka10082",
-            symbol,
-            {"base_dt": now_kr().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
-            "stk_stk_pole_chart_qry",
-        )
-        bars = self._parse_daily_rows(rows)
-        bars.sort(key=lambda bar: bar.time)
-        return bars[-limit:]
+        stale = self.cache.get(stale_key)
+        if stale:
+            self.logger.warning("Using stale weekly chart for %s because fresh response was empty.", symbol)
+            return stale[-limit:]
+        return []
 
     async def get_minute_bars(
         self,
@@ -393,21 +495,45 @@ class KiwoomClientService:
         base_dt: str | None = None,
     ) -> list[ChartBar]:
         """Return minute bars from ka10080."""
+        stale_key = f"chartbars-stale:minute:{normalize_symbol(symbol)}:{minutes}:{base_dt or now_kr().strftime('%Y%m%d')}"
+        try:
+            rows = await self._collect_chart_rows_with_symbol_fallback(
+                "/api/dostk/chart",
+                "ka10080",
+                symbol,
+                {
+                    "tic_scope": str(minutes),
+                    "upd_stkpc_tp": "1",
+                    "base_dt": base_dt or now_kr().strftime("%Y%m%d"),
+                },
+                "stk_min_pole_chart_qry",
+            )
+            bars = self._parse_minute_rows(rows, base_dt=base_dt or now_kr().strftime("%Y-%m-%d"))
+            bars.sort(key=lambda bar: bar.time)
+            if bars:
+                self.cache.set(stale_key, bars, self._chart_stale_ttl_seconds)
+                return bars[-limit:]
+        except KiwoomRequestError as exc:
+            stale = self.cache.get(stale_key)
+            if stale:
+                self.logger.warning(
+                    "Using stale %sm chart for %s after Kiwoom error: %s",
+                    minutes,
+                    symbol,
+                    exc,
+                )
+                return stale[-limit:]
+            raise
 
-        rows = await self._collect_chart_rows_with_symbol_fallback(
-            "/api/dostk/chart",
-            "ka10080",
-            symbol,
-            {
-                "tic_scope": str(minutes),
-                "upd_stkpc_tp": "1",
-                "base_dt": base_dt or now_kr().strftime("%Y%m%d"),
-            },
-            "stk_min_pole_chart_qry",
-        )
-        bars = self._parse_minute_rows(rows, base_dt=base_dt or now_kr().strftime("%Y-%m-%d"))
-        bars.sort(key=lambda bar: bar.time)
-        return bars[-limit:]
+        stale = self.cache.get(stale_key)
+        if stale:
+            self.logger.warning(
+                "Using stale %sm chart for %s because fresh response was empty.",
+                minutes,
+                symbol,
+            )
+            return stale[-limit:]
+        return []
 
     async def _get_daily_chart_bars(self, symbol: str, range_label: str) -> list[ChartBar]:
         days_map = {"1m": 22, "3m": 66, "6m": 132, "1y": 260}
@@ -448,6 +574,7 @@ class KiwoomClientService:
         body: dict[str, Any],
         continuation_key: str | None = None,
         retry_on_auth_error: bool = True,
+        retry_on_rate_limit: bool = True,
     ) -> KiwoomResponse:
         """Call a Kiwoom REST endpoint."""
 
@@ -464,6 +591,7 @@ class KiwoomClientService:
         url = f"{self.settings.kiwoom_rest_base_url}{path}"
         async with httpx.AsyncClient(timeout=self.settings.kiwoom_timeout_seconds) as client:
             try:
+                await self._respect_rate_limit()
                 response = await client.post(url, headers=headers, json=body)
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -475,6 +603,17 @@ class KiwoomClientService:
                         body,
                         continuation_key=continuation_key,
                         retry_on_auth_error=False,
+                        retry_on_rate_limit=retry_on_rate_limit,
+                    )
+                if exc.response.status_code == 429 and retry_on_rate_limit:
+                    await asyncio.sleep(0.6)
+                    return await self._post(
+                        path,
+                        api_id,
+                        body,
+                        continuation_key=continuation_key,
+                        retry_on_auth_error=retry_on_auth_error,
+                        retry_on_rate_limit=False,
                     )
                 self.last_error = f"HTTP error {exc.response.status_code} for {api_id}"
                 self._remember_error(self.last_error)
@@ -503,6 +642,20 @@ class KiwoomClientService:
             next_key=response.headers.get("next-key"),
         )
 
+    async def _respect_rate_limit(self) -> None:
+        """Serialize requests so Kiwoom REST is less likely to return 429."""
+
+        min_interval = max(self.settings.kiwoom_min_request_interval_seconds, 0.0)
+        if min_interval <= 0:
+            return
+
+        async with self._request_lock:
+            elapsed = time.monotonic() - self._last_request_monotonic
+            remaining = min_interval - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._last_request_monotonic = time.monotonic()
+
     async def _collect_chart_rows_with_symbol_fallback(
         self,
         path: str,
@@ -516,6 +669,7 @@ class KiwoomClientService:
 
         candidates = stock_code_candidates(normalize_symbol(symbol), self.settings.kiwoom_env)
         last_rows: list[dict[str, Any]] = []
+        last_error: KiwoomRequestError | None = None
         for code in candidates:
             try:
                 rows = await self._collect_chart_rows(
@@ -525,11 +679,15 @@ class KiwoomClientService:
                     row_key,
                     max_pages=max_pages,
                 )
-            except KiwoomRequestError:
+            except KiwoomRequestError as exc:
+                last_error = exc
                 continue
-            if rows:
-                return rows
-            last_rows = rows
+            usable_rows = filter_usable_chart_rows(rows, row_key)
+            if usable_rows:
+                return usable_rows
+            last_rows = usable_rows
+        if last_error is not None and not last_rows:
+            raise last_error
         return last_rows
 
     async def _collect_chart_rows(
@@ -573,25 +731,35 @@ class KiwoomClientService:
         ]
 
     def _parse_minute_rows(self, rows: list[dict[str, Any]], base_dt: str) -> list[ChartBar]:
-        trade_date = base_dt if "-" in base_dt else format_date(base_dt)
-        return [
-            ChartBar(
-                time=f"{trade_date}T{format_intraday(str(row.get('cntr_tm', '')))}:00",
-                open=safe_abs_int(row.get("open_pric")),
-                high=safe_abs_int(row.get("high_pric")),
-                low=safe_abs_int(row.get("low_pric")),
-                close=safe_abs_int(row.get("cur_prc")),
-                volume=safe_abs_int(row.get("trde_qty")),
+        default_trade_date = base_dt if "-" in base_dt else format_date(base_dt)
+        bars: list[ChartBar] = []
+        for row in rows:
+            timestamp = re.sub(r"[^0-9]", "", str(row.get("cntr_tm", "")))
+            if not timestamp:
+                continue
+            if len(timestamp) >= 14:
+                trade_date = format_date(timestamp[:8])
+                trade_time = format_intraday(timestamp[-6:])
+            else:
+                trade_date = default_trade_date
+                trade_time = format_intraday(timestamp)
+            bars.append(
+                ChartBar(
+                    time=f"{trade_date}T{trade_time}:00",
+                    open=safe_abs_int(row.get("open_pric")),
+                    high=safe_abs_int(row.get("high_pric")),
+                    low=safe_abs_int(row.get("low_pric")),
+                    close=safe_abs_int(row.get("cur_prc")),
+                    volume=safe_abs_int(row.get("trde_qty")),
+                )
             )
-            for row in rows
-            if str(row.get("cntr_tm", "")).strip()
-        ]
+        return bars
 
     async def health_check(self) -> bool:
         """Cheap readiness check via token + account lookup."""
 
         try:
-            await self.verify_account()
+            await self.get_account_numbers()
         except Exception as exc:
             self.last_error = str(exc)
             return False
@@ -618,9 +786,119 @@ class KiwoomClientService:
 
         return list(self._recent_errors)
 
+    def get_stock_universe_source(self) -> str:
+        """Return which source last populated the searchable stock universe."""
+
+        return self._stock_universe_source
+
     def _remember_error(self, message: str) -> None:
         self._recent_errors.append(message)
         self._recent_errors = self._recent_errors[-10:]
+
+    async def _get_account_snapshot(self) -> AccountSnapshot:
+        """Fetch one combined account snapshot and reuse it for summary/holdings."""
+
+        async def _factory() -> AccountSnapshot:
+            deposit_result = await self._post("/api/dostk/acnt", "kt00001", {"qry_tp": "2"})
+            snapshot_result = await self._post(
+                "/api/dostk/acnt",
+                "kt00018",
+                {"qry_tp": "1", "dmst_stex_tp": "KRX"},
+            )
+            snapshot = AccountSnapshot(
+                total_evaluation_amount=safe_abs_int(snapshot_result.body.get("tot_evlt_amt")),
+                total_profit_loss=safe_int(snapshot_result.body.get("tot_evlt_pl")),
+                total_profit_rate=safe_float(snapshot_result.body.get("tot_prft_rt")),
+                estimated_assets=safe_abs_int(snapshot_result.body.get("prsm_dpst_aset_amt")),
+                deposit=safe_abs_int(deposit_result.body.get("entr")),
+                holdings_rows=snapshot_result.body.get("acnt_evlt_remn_indv_tot", []) or [],
+                updated_at=now_kr(),
+            )
+            self._last_account_snapshot = snapshot
+            return snapshot
+
+        try:
+            return await self.cache.get_or_set(
+                "account_snapshot",
+                max(self.settings.kiwoom_account_cache_ttl_seconds, 30),
+                _factory,
+            )
+        except KiwoomRequestError as exc:
+            if "429" in str(exc) and self._last_account_snapshot is not None:
+                self.logger.warning(
+                    "Using stale account snapshot because Kiwoom rate-limited kt00018/kt00001: %s",
+                    exc,
+                )
+                return self._last_account_snapshot
+            raise
+
+    def _load_persisted_stock_universe(self, max_age_seconds: int | None) -> list[StockSearchItem]:
+        """Load the last saved stock universe from runtime storage."""
+
+        path = self.settings.stock_universe_cache_file
+        if not path.exists():
+            return []
+        if max_age_seconds is not None:
+            age_seconds = (datetime.now().timestamp() - path.stat().st_mtime)
+            if age_seconds > max_age_seconds:
+                return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self.logger.warning("Ignoring invalid stock universe cache file: %s", exc)
+            return []
+        items = payload.get("items", [])
+        return [StockSearchItem(**item) for item in items]
+
+    def _persist_stock_universe(self, universe: list[StockSearchItem]) -> None:
+        """Save the stock universe for future fallback use."""
+
+        path = self.settings.stock_universe_cache_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "updated_at": now_kr().isoformat(),
+            "source": self._stock_universe_source,
+            "items": [item.model_dump(mode="json") for item in universe],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    async def _fetch_kind_stock_universe(self) -> list[StockSearchItem]:
+        """Fallback to the official KIND listed-corporation download for search."""
+
+        def _download() -> str:
+            req = urllib.request.Request(
+                "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=self.settings.kiwoom_timeout_seconds) as response:
+                return response.read().decode("euc-kr", errors="replace")
+
+        html_text = await asyncio.to_thread(_download)
+        rows = re.findall(r"<tr>(.*?)</tr>", html_text, flags=re.S | re.I)
+        items: dict[str, StockSearchItem] = {}
+        for row in rows[1:]:
+            cols = re.findall(r"<td[^>]*>(.*?)</td>", row, flags=re.S | re.I)
+            if len(cols) < 3:
+                continue
+            company_name = strip_html(cols[0])
+            market_name = strip_html(cols[1])
+            symbol = normalize_symbol(strip_html(cols[2]).zfill(6))
+            if not company_name or not symbol:
+                continue
+            market_code = {
+                "유가증권시장": "0",
+                "코스피": "0",
+                "코스닥": "10",
+                "코넥스": "8",
+            }.get(market_name, "")
+            items[symbol] = StockSearchItem(
+                symbol=symbol,
+                name=company_name,
+                market_code=market_code or "0",
+                market_name=market_name or "KRX",
+                last_price=None,
+            )
+        return sorted(items.values(), key=lambda item: (item.market_name, item.name))
 
 
 def safe_int(value: Any) -> int:
@@ -694,7 +972,8 @@ def format_date(raw: str) -> str:
 def format_intraday(raw: str) -> str:
     """Format HHMMSS to HH:MM."""
 
-    value = raw.zfill(6)
+    digits = re.sub(r"[^0-9]", "", raw or "")
+    value = (digits[-6:] if len(digits) >= 6 else digits.zfill(6))
     return f"{value[:2]}:{value[2:4]}"
 
 
@@ -714,6 +993,23 @@ def ordinal(level: int) -> str:
         10: "10th",
     }
     return mapping[level]
+
+
+def rest_orderbook_suffixes(level: int) -> list[str]:
+    """Return both documented and observed REST suffix variants."""
+
+    return [f"{level}th", ordinal(level)]
+
+
+def flatten_keys(*groups: list[str]) -> list[str]:
+    """Flatten multiple candidate-key lists while preserving order and uniqueness."""
+
+    flattened: list[str] = []
+    for group in groups:
+        for key in group:
+            if key not in flattened:
+                flattened.append(key)
+    return flattened
 
 
 def pick_first_int(body: dict[str, Any], keys: list[str]) -> int:
@@ -751,8 +1047,29 @@ def has_market_payload(body: dict[str, Any]) -> bool:
     if minute and safe_abs_int(minute[0].get("cur_prc")) > 0:
         return True
 
-    orderbook = body.get("sel_1st_pre_bid") or body.get("buy_1st_pre_bid")
+    orderbook = (
+        body.get("sel_fpr_bid")
+        or body.get("buy_fpr_bid")
+        or body.get("sel_1th_pre_bid")
+        or body.get("buy_1th_pre_bid")
+        or body.get("sel_1st_pre_bid")
+        or body.get("buy_1st_pre_bid")
+    )
     if safe_abs_int(orderbook) > 0:
         return True
 
     return False
+
+
+def filter_usable_chart_rows(rows: list[dict[str, Any]], row_key: str) -> list[dict[str, Any]]:
+    """Drop blank placeholder rows returned by alternate stock-code formats."""
+
+    if row_key == "stk_min_pole_chart_qry":
+        return [row for row in rows if str(row.get("cntr_tm", "")).strip()]
+    return [row for row in rows if str(row.get("dt", "")).strip()]
+
+
+def strip_html(value: str) -> str:
+    """Strip HTML tags and decode entities from plain table cells."""
+
+    return html.unescape(re.sub(r"<[^>]+>", "", value or "")).strip()

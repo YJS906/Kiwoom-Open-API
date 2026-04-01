@@ -46,6 +46,9 @@ class KiwoomWebSocketService:
         self._refresh_event = asyncio.Event()
         self._upstream_task: asyncio.Task[None] | None = None
         self._active_symbols: set[str] = set()
+        self._upstream_socket: Any | None = None
+        self._request_lock = asyncio.Lock()
+        self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     async def relay(self, websocket: WebSocket) -> None:
         """Accept one browser websocket and register its symbol subscription."""
@@ -117,6 +120,10 @@ class KiwoomWebSocketService:
             self._upstream_task = None
             self._subscriber_symbols.clear()
             self._refresh_event.set()
+            for future in self._pending_requests.values():
+                if not future.done():
+                    future.cancel()
+            self._pending_requests.clear()
 
         if task is not None:
             task.cancel()
@@ -179,64 +186,70 @@ class KiwoomWebSocketService:
 
     async def _run_upstream_session(self, symbols: set[str]) -> None:
         token = await self.auth_service.get_token()
-        async with ws_connect(
-            self.settings.kiwoom_ws_url,
-            ping_interval=20,
-            ping_timeout=20,
-            open_timeout=self.settings.kiwoom_timeout_seconds,
-        ) as upstream:
-            await self._login_upstream(upstream, token)
-            await upstream.send(json.dumps(self._build_register_message(symbols), ensure_ascii=False))
+        try:
+            async with ws_connect(
+                self.settings.kiwoom_ws_url,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=self.settings.kiwoom_timeout_seconds,
+            ) as upstream:
+                await self._login_upstream(upstream, token)
+                await upstream.send(json.dumps(self._build_register_message(symbols), ensure_ascii=False))
+                self._upstream_socket = upstream
 
-            self._set_connected(True, None)
-            self.last_connected_at = now_kr()
-            self._active_symbols = set(symbols)
-            await self._broadcast(
-                self._envelope(
-                    "status",
-                    sorted(symbols)[0] if symbols else None,
-                    {"connected": True, "detail": "Realtime stream connected."},
-                )
-            )
-
-            while True:
-                receive_task = asyncio.create_task(upstream.recv())
-                refresh_task = asyncio.create_task(self._refresh_event.wait())
-
-                done, pending = await asyncio.wait(
-                    {receive_task, refresh_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+                self._set_connected(True, None)
+                self.last_connected_at = now_kr()
+                self._active_symbols = set(symbols)
+                await self._broadcast(
+                    self._envelope(
+                        "status",
+                        sorted(symbols)[0] if symbols else None,
+                        {"connected": True, "detail": "Realtime stream connected."},
+                    )
                 )
 
-                for task in pending:
-                    task.cancel()
+                while True:
+                    receive_task = asyncio.create_task(upstream.recv())
+                    refresh_task = asyncio.create_task(self._refresh_event.wait())
 
-                if refresh_task in done:
-                    self._refresh_event.clear()
-                    desired_symbols = await self._get_desired_symbols()
-                    if not desired_symbols:
-                        await upstream.close(code=1000)
-                        return
-                    if desired_symbols != self._active_symbols:
-                        await upstream.close(code=1000)
-                        return
-                    continue
+                    done, pending = await asyncio.wait(
+                        {receive_task, refresh_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
 
-                try:
-                    raw_message = receive_task.result()
-                except ConnectionClosed as exc:
-                    self._set_connected(False, f"Kiwoom websocket closed: {exc.code}")
-                    raise RuntimeError(f"Kiwoom websocket closed: {exc.code}") from exc
+                    for task in pending:
+                        task.cancel()
 
-                control_status = await self._handle_control_message(upstream, raw_message)
-                if control_status == "ping":
-                    continue
-                if control_status == "system_close":
-                    raise RuntimeError("Kiwoom websocket session was replaced by another App Key session.")
+                    if refresh_task in done:
+                        self._refresh_event.clear()
+                        desired_symbols = await self._get_desired_symbols()
+                        if not desired_symbols:
+                            await upstream.close(code=1000)
+                            return
+                        if desired_symbols != self._active_symbols:
+                            await upstream.close(code=1000)
+                            return
+                        continue
 
-                envelopes = self._parse_message(str(raw_message))
-                for envelope in envelopes:
-                    await self._broadcast(envelope)
+                    try:
+                        raw_message = receive_task.result()
+                    except ConnectionClosed as exc:
+                        self._set_connected(False, f"Kiwoom websocket closed: {exc.code}")
+                        raise RuntimeError(f"Kiwoom websocket closed: {exc.code}") from exc
+
+                    control_status = await self._handle_control_message(upstream, raw_message)
+                    if control_status == "ping":
+                        continue
+                    if control_status == "system_close":
+                        raise RuntimeError("Kiwoom websocket session was replaced by another App Key session.")
+                    if self._dispatch_pending_request(str(raw_message)):
+                        continue
+
+                    envelopes = self._parse_message(str(raw_message))
+                    for envelope in envelopes:
+                        await self._broadcast(envelope)
+        finally:
+            self._upstream_socket = None
 
     async def _login_upstream(self, upstream: Any, token: str) -> None:
         """Authenticate using the documented LOGIN packet."""
@@ -262,6 +275,53 @@ class KiwoomWebSocketService:
             if return_code not in {"0", "None", "null"}:
                 raise RuntimeError(str(payload.get("return_msg", "Kiwoom websocket login failed.")))
             return
+
+    async def request_condition_list(self) -> dict[str, Any]:
+        """Query condition definitions through the shared Kiwoom websocket session."""
+
+        return await self._request_via_shared_upstream({"trnm": "CNSRLST"}, expected_trnm="CNSRLST")
+
+    async def request_condition_search(self, seq: str, stex_tp: str = "K") -> dict[str, Any]:
+        """Query one condition result through the shared Kiwoom websocket session."""
+
+        return await self._request_via_shared_upstream(
+            {"trnm": "CNSRREQ", "seq": seq, "search_type": "0", "stex_tp": stex_tp},
+            expected_trnm="CNSRREQ",
+        )
+
+    async def _request_via_shared_upstream(self, payload: dict[str, Any], expected_trnm: str) -> dict[str, Any]:
+        """Send a request/response style websocket message over the existing upstream session."""
+
+        if not self._connected or self._upstream_socket is None:
+            raise RuntimeError("Shared Kiwoom websocket session is not active.")
+
+        async with self._request_lock:
+            if self._upstream_socket is None:
+                raise RuntimeError("Shared Kiwoom websocket session is not active.")
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._pending_requests[expected_trnm] = future
+            try:
+                await self._upstream_socket.send(json.dumps(payload, ensure_ascii=False))
+                return await asyncio.wait_for(future, timeout=self.settings.kiwoom_timeout_seconds)
+            finally:
+                self._pending_requests.pop(expected_trnm, None)
+
+    def _dispatch_pending_request(self, raw_message: str) -> bool:
+        """Resolve any waiting request/response future before normal realtime parsing."""
+
+        try:
+            payload = json.loads(raw_message)
+        except json.JSONDecodeError:
+            return False
+
+        trnm = str(payload.get("trnm", ""))
+        future = self._pending_requests.get(trnm)
+        if future is None:
+            return False
+        if not future.done():
+            future.set_result(payload)
+        return True
 
     async def _handle_control_message(self, upstream: Any, raw_message: Any) -> str | None:
         """Handle PING and SYSTEM packets before realtime parsing."""

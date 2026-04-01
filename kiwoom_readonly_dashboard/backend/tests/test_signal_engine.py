@@ -20,49 +20,111 @@ SEOUL = timezone(timedelta(hours=9))
 
 def make_daily_bars() -> list[TradeBar]:
     bars: list[TradeBar] = []
-    price = 100
-    for index in range(260):
+    for index in range(220):
+        close = 100 + (index // 5)
         bars.append(
             TradeBar(
                 timeframe="daily",
                 time=f"2025-01-{(index % 28) + 1:02d}",
-                open=price,
-                high=price + 4,
-                low=price - 2,
-                close=price + 2,
-                volume=1000 + index * 3,
+                open=close - 1,
+                high=close + 2,
+                low=close - 2,
+                close=close,
+                volume=1100 + (index % 7) * 20,
             )
         )
-        price += 1
+
+    staged_closes = [
+        138,
+        139,
+        139,
+        140,
+        140,
+        141,
+        141,
+        142,
+        142,
+        143,
+        143,
+        144,
+        144,
+        145,
+        145,
+        146,
+        146,
+        147,
+        147,
+        148,
+        149,
+        149,
+        150,
+        150,
+        151,
+        151,
+        152,
+        152,
+        153,
+        153,
+        154,
+        154,
+        155,
+        155,
+        156,
+        156,
+        157,
+        157,
+        158,
+        158,
+    ]
+
+    for offset, close in enumerate(staged_closes):
+        absolute_index = 220 + offset
+        high = close + 1
+        volume = 1300 + (offset % 5) * 30
+        if offset == 20:
+            high = 150
+            close = 149
+            volume = 4200
+        bars.append(
+            TradeBar(
+                timeframe="daily",
+                time=f"2025-02-{(absolute_index % 28) + 1:02d}",
+                open=close - 1,
+                high=high,
+                low=close - 2,
+                close=close,
+                volume=volume,
+            )
+        )
     return bars
 
 
 def make_60m_bars() -> list[TradeBar]:
     prices = [
-        100,
-        104,
-        108,
-        112,
-        118,
-        124,
-        130,
-        138,
-        146,
-        154,
-        160,
-        156,
-        150,
-        144,
-        138,
+        120,
+        123,
+        126,
+        129,
+        132,
+        136,
         140,
-        142,
-        145,
-        147,
+        144,
+        148,
+        152,
+        156,
+        160,
+        158,
+        156,
+        154,
+        152,
+        150,
         149,
+        150,
         151,
         152,
         153,
         154,
+        155,
     ]
     bars: list[TradeBar] = []
     for index, close in enumerate(prices):
@@ -70,29 +132,30 @@ def make_60m_bars() -> list[TradeBar]:
             TradeBar(
                 timeframe="60m",
                 time=f"2025-03-31T{9 + (index % 8):02d}:00:00",
-                open=close - 2,
+                open=close - 1,
                 high=close + 2,
-                low=close - 4,
+                low=close - 2,
                 close=close,
-                volume=1200 if index <= 10 else 500,
+                volume=1500 if index <= 11 else 500,
             )
         )
     return bars
 
 
 def make_trigger_bars() -> list[TradeBar]:
-    closes = [140, 141, 142, 143, 144, 145, 144, 145, 146, 147, 148, 151]
+    closes = [149, 149, 150, 150, 151, 151, 150, 151, 152, 152, 153, 154]
     bars: list[TradeBar] = []
     for index, close in enumerate(closes):
+        open_price = close - 1 if index == len(closes) - 1 else close
         bars.append(
             TradeBar(
                 timeframe="15m",
                 time=f"2025-03-31T10:{index * 5:02d}:00",
-                open=close - 1,
+                open=open_price,
                 high=close + 1,
                 low=close - 2,
                 close=close,
-                volume=200 + index * 5,
+                volume=220 + index * 10,
             )
         )
     return bars

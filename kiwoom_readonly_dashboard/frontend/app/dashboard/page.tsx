@@ -114,7 +114,7 @@ export default function DashboardPage() {
     void loadOverview();
     const timer = window.setInterval(() => {
       void loadOverview();
-    }, 20000);
+    }, 30000);
 
     return () => {
       active = false;
@@ -299,6 +299,7 @@ export default function DashboardPage() {
             />
             <High52CandidatesPanel
               items={strategySnapshot?.candidates ?? []}
+              source={strategySnapshot?.scanner_source ?? null}
               selectedSymbol={selectedSymbol}
               onSelect={setSelectedSymbol}
             />
@@ -477,4 +478,3 @@ function numberOrNull(value: unknown) {
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
 }
-

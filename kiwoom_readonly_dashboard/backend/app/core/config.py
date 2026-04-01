@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     kiwoom_secret_key: str = Field(alias="KIWOOM_SECRET_KEY")
     kiwoom_account_no: str = Field(alias="KIWOOM_ACCOUNT_NO")
     kiwoom_timeout_seconds: float = Field(default=15.0, alias="KIWOOM_TIMEOUT_SECONDS")
+    kiwoom_min_request_interval_seconds: float = Field(
+        default=0.35,
+        alias="KIWOOM_MIN_REQUEST_INTERVAL_SECONDS",
+    )
     kiwoom_symbol_cache_ttl_seconds: int = Field(
         default=21600,
         alias="KIWOOM_SYMBOL_CACHE_TTL_SECONDS",
@@ -51,7 +55,7 @@ class Settings(BaseSettings):
         alias="KIWOOM_QUOTE_CACHE_TTL_SECONDS",
     )
     kiwoom_account_cache_ttl_seconds: int = Field(
-        default=10,
+        default=30,
         alias="KIWOOM_ACCOUNT_CACHE_TTL_SECONDS",
     )
     news_cache_ttl_seconds: int = Field(default=60, alias="NEWS_CACHE_TTL_SECONDS")
@@ -94,6 +98,11 @@ class Settings(BaseSettings):
     @property
     def token_cache_file(self) -> Path:
         return self.runtime_dir / f"kiwoom_token_{self.kiwoom_env}.json"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def stock_universe_cache_file(self) -> Path:
+        return self.runtime_dir / "stock_universe_cache.json"
 
     @computed_field  # type: ignore[prop-decorator]
     @property

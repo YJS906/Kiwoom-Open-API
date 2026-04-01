@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from app.models.trading import PriceLevel, RiskConfig, StrategyConfig, StrategyDecision, TradeBar
 
@@ -14,6 +15,8 @@ class PullbackAnalysis:
     rally_volume_avg: float | None
     pullback_volume_avg: float | None
     breakout_price: int | None
+    support_price: int | None
+    support_reference: str | None
     summary: str
 
 
@@ -22,6 +25,7 @@ class TriggerAnalysis:
     passed: bool
     entry_price: int | None
     vwap: float | None
+    bullish_reversal: bool
     summary: str
 
 
@@ -63,11 +67,11 @@ class PullbackStrategyEngine:
                 stage="daily_filter",
                 summary="The daily trend filter did not pass.",
                 reasons=daily_filter["reasons"],
-                breakout_price=daily_filter.get("breakout_price"),
+                breakout_price=to_int_or_none(daily_filter.get("breakout_price")),
                 metrics=daily_filter,
             )
 
-        pullback = self._evaluate_pullback(bars_60m)
+        pullback = self._evaluate_pullback(bars_60m, daily_filter)
         if not pullback.passed:
             return StrategyDecision(
                 symbol=symbol,
@@ -75,14 +79,26 @@ class PullbackStrategyEngine:
                 stage="pullback_filter",
                 summary=pullback.summary,
                 reasons=[pullback.summary],
-                breakout_price=daily_filter.get("breakout_price"),
+                breakout_price=to_int_or_none(daily_filter.get("breakout_price")),
                 pullback_ratio=pullback.ratio,
                 rally_volume_avg=pullback.rally_volume_avg,
                 pullback_volume_avg=pullback.pullback_volume_avg,
-                metrics={"daily": daily_filter},
+                annotations=self._build_annotations(
+                    entry_price=None,
+                    stop_price=None,
+                    target_price=None,
+                    breakout_price=pullback.breakout_price or to_int_or_none(daily_filter.get("breakout_price")),
+                    support_price=pullback.support_price,
+                ),
+                metrics={"daily": daily_filter, "support_reference": pullback.support_reference},
             )
 
-        trigger = self._evaluate_trigger(trigger_bars)
+        decision_breakout_price = to_int_or_none(daily_filter.get("breakout_price")) or pullback.breakout_price
+        trigger_reference_price = pullback.support_price or decision_breakout_price
+        trigger = self._evaluate_trigger(
+            trigger_bars,
+            breakout_price=trigger_reference_price,
+        )
         if not trigger.passed:
             return StrategyDecision(
                 symbol=symbol,
@@ -90,16 +106,29 @@ class PullbackStrategyEngine:
                 stage="trigger",
                 summary=trigger.summary,
                 reasons=[trigger.summary],
-                breakout_price=pullback.breakout_price or daily_filter.get("breakout_price"),
+                breakout_price=decision_breakout_price,
                 pullback_ratio=pullback.ratio,
                 rally_volume_avg=pullback.rally_volume_avg,
                 pullback_volume_avg=pullback.pullback_volume_avg,
                 vwap=trigger.vwap,
-                metrics={"daily": daily_filter},
+                annotations=self._build_annotations(
+                    entry_price=None,
+                    stop_price=None,
+                    target_price=None,
+                    breakout_price=decision_breakout_price,
+                    support_price=pullback.support_price,
+                ),
+                metrics={
+                    "daily": daily_filter,
+                    "support_reference": pullback.support_reference,
+                    "bullish_reversal": trigger.bullish_reversal,
+                },
             )
 
         entry_price = int(trigger.entry_price or trigger_bars[-1].close)
-        stop_price = max(int(entry_price * (1 - self.risk.stop_loss_pct)), 1)
+        breakout_price = decision_breakout_price
+        support_price = pullback.support_price
+        stop_price = self._calculate_stop_price(entry_price, support_price)
         risk_per_share = max(entry_price - stop_price, 1)
         target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
 
@@ -111,33 +140,34 @@ class PullbackStrategyEngine:
             reasons=[
                 "Daily close is above the fast MA.",
                 "Fast MA is above the slow MA.",
-                "A recent 52-week breakout is still in effect.",
+                "A recent 52-week breakout was confirmed with strong daily volume.",
                 "60-minute pullback depth and volume contraction passed.",
+                "The pullback held the configured breakout / moving-average support zone.",
                 f"{self.config.trigger_timeframe} trigger confirmed the rebound.",
             ],
             entry_timeframe=self.config.trigger_timeframe,
             entry_price=entry_price,
             stop_price=stop_price,
             target_price=target_price,
-            breakout_price=pullback.breakout_price or daily_filter.get("breakout_price"),
+            breakout_price=breakout_price,
             pullback_ratio=pullback.ratio,
             rally_volume_avg=pullback.rally_volume_avg,
             pullback_volume_avg=pullback.pullback_volume_avg,
             vwap=trigger.vwap,
-            annotations=[
-                PriceLevel(label="Entry", price=entry_price, kind="entry"),
-                PriceLevel(label="Stop", price=stop_price, kind="stop"),
-                PriceLevel(label="Target", price=target_price, kind="target"),
-                PriceLevel(
-                    label="Breakout",
-                    price=int(pullback.breakout_price or daily_filter.get("breakout_price") or entry_price),
-                    kind="breakout",
-                ),
-            ],
+            annotations=self._build_annotations(
+                entry_price=entry_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                breakout_price=breakout_price,
+                support_price=support_price,
+            ),
             metrics={
                 "daily": daily_filter,
                 "pullback_ratio": pullback.ratio,
+                "support_reference": pullback.support_reference,
+                "support_price": support_price,
                 "vwap": trigger.vwap,
+                "bullish_reversal": trigger.bullish_reversal,
             },
         )
 
@@ -148,11 +178,26 @@ class PullbackStrategyEngine:
         current_close = closes[-1]
         recent_window = bars[-252:] if len(bars) >= 252 else bars
         highest_52w = max(bar.high for bar in recent_window)
-        breakout_bar = None
-        for bar in reversed(bars[-self.config.recent_breakout_days :]):
-            trailing = [item.high for item in bars if item.time <= bar.time][-252:]
-            if trailing and bar.high >= max(trailing):
+        breakout_bar: TradeBar | None = None
+        breakout_volume_ratio: float | None = None
+
+        recent_start = max(0, len(bars) - self.config.recent_breakout_days)
+        for index in range(len(bars) - 1, recent_start - 1, -1):
+            bar = bars[index]
+            trailing = bars[max(0, index - 251) : index + 1]
+            prior_trailing = trailing[:-1]
+            if not prior_trailing:
+                continue
+            prior_high = max(item.high for item in prior_trailing)
+            if bar.high < prior_high:
+                continue
+
+            volume_window = bars[max(0, index - self.config.breakout_volume_lookback_days) : index]
+            avg_volume = average([item.volume for item in volume_window])
+            volume_ratio = (bar.volume / avg_volume) if avg_volume else 0.0
+            if volume_ratio >= self.config.breakout_volume_multiplier:
                 breakout_bar = bar
+                breakout_volume_ratio = volume_ratio
                 break
 
         reasons: list[str] = []
@@ -165,7 +210,9 @@ class PullbackStrategyEngine:
             reasons.append("Fast moving average is not above the slow moving average.")
         if breakout_bar is None:
             passed = False
-            reasons.append("No recent 52-week breakout was found in the configured window.")
+            reasons.append(
+                "No recent 52-week breakout with strong enough daily volume was found in the configured window."
+            )
 
         return {
             "passed": passed,
@@ -175,10 +222,15 @@ class PullbackStrategyEngine:
             "highest_52w": highest_52w,
             "breakout_price": breakout_bar.high if breakout_bar else highest_52w,
             "breakout_date": breakout_bar.time if breakout_bar else None,
+            "breakout_volume_ratio": breakout_volume_ratio,
             "reasons": reasons,
         }
 
-    def _evaluate_pullback(self, bars_60m: list[TradeBar]) -> PullbackAnalysis:
+    def _evaluate_pullback(
+        self,
+        bars_60m: list[TradeBar],
+        daily_filter: dict[str, object],
+    ) -> PullbackAnalysis:
         window = bars_60m[-self.config.rally_window_bars_60m :]
         breakout_bar = max(window, key=lambda bar: bar.high)
         breakout_index = window.index(breakout_bar)
@@ -189,6 +241,8 @@ class PullbackStrategyEngine:
                 rally_volume_avg=None,
                 pullback_volume_avg=None,
                 breakout_price=breakout_bar.high,
+                support_price=None,
+                support_reference=None,
                 summary="The 60-minute bars do not show a usable rally and pullback structure.",
             )
 
@@ -210,6 +264,8 @@ class PullbackStrategyEngine:
                 rally_volume_avg=rally_volume_avg,
                 pullback_volume_avg=pullback_volume_avg,
                 breakout_price=rally_high,
+                support_price=None,
+                support_reference=None,
                 summary="The 60-minute pullback depth is outside the configured ratio band.",
             )
 
@@ -220,7 +276,26 @@ class PullbackStrategyEngine:
                 rally_volume_avg=rally_volume_avg,
                 pullback_volume_avg=pullback_volume_avg,
                 breakout_price=rally_high,
+                support_price=None,
+                support_reference=None,
                 summary="Pullback volume has not dried up enough versus the prior rally.",
+            )
+
+        support_price, support_reference, support_ok = self._evaluate_support_zone(
+            pullback_low=pullback_low,
+            breakout_price=to_int_or_none(daily_filter.get("breakout_price")),
+            ma_fast=daily_filter.get("ma_fast"),
+        )
+        if support_price is not None and not support_ok:
+            return PullbackAnalysis(
+                passed=False,
+                ratio=ratio,
+                rally_volume_avg=rally_volume_avg,
+                pullback_volume_avg=pullback_volume_avg,
+                breakout_price=rally_high,
+                support_price=support_price,
+                support_reference=support_reference,
+                summary="The pullback fell too far below the configured support zone.",
             )
 
         return PullbackAnalysis(
@@ -229,45 +304,132 @@ class PullbackStrategyEngine:
             rally_volume_avg=rally_volume_avg,
             pullback_volume_avg=pullback_volume_avg,
             breakout_price=rally_high,
-            summary="60-minute pullback depth and volume contraction passed.",
+            support_price=support_price,
+            support_reference=support_reference,
+            summary="60-minute pullback depth, volume contraction and support-hold checks passed.",
         )
 
-    def _evaluate_trigger(self, bars: list[TradeBar]) -> TriggerAnalysis:
+    def _evaluate_trigger(
+        self,
+        bars: list[TradeBar],
+        breakout_price: int | None,
+    ) -> TriggerAnalysis:
         if len(bars) < 12:
             return TriggerAnalysis(
                 passed=False,
                 entry_price=None,
                 vwap=None,
+                bullish_reversal=False,
                 summary="Not enough trigger bars were available for the short-term entry check.",
             )
 
         recent = bars[-5:]
         previous = bars[-6:-1]
+        latest = recent[-1]
         higher_low = min(bar.low for bar in recent[-2:]) > min(bar.low for bar in previous[-2:])
-        breakout = recent[-1].close > max(bar.high for bar in previous[-3:])
+        breakout = latest.close > max(bar.high for bar in previous[-3:])
         fast_ma = moving_average([bar.close for bar in bars], 5)
         slow_ma = moving_average([bar.close for bar in bars], 10)
         vwap_value = calculate_vwap(bars[-20:])
+        bullish_reversal = latest.close >= latest.open or latest.close > previous[-1].close
 
         checks = [higher_low or breakout, fast_ma > slow_ma]
+        if breakout_price is not None:
+            checks.append(latest.close >= int(breakout_price * (1 - self.config.support_tolerance_pct)))
         if self.config.use_vwap:
-            checks.append(bars[-1].close > vwap_value)
+            checks.append(latest.close > vwap_value)
+        if self.config.require_bullish_reversal_candle:
+            checks.append(bullish_reversal)
 
         if not all(checks):
             return TriggerAnalysis(
                 passed=False,
                 entry_price=None,
                 vwap=vwap_value,
+                bullish_reversal=bullish_reversal,
                 summary="The lower timeframe rebound trigger has not confirmed yet.",
             )
 
-        entry_price = max(recent[-1].close, previous[-1].high)
+        entry_price = max(latest.close, previous[-1].high)
         return TriggerAnalysis(
             passed=True,
             entry_price=entry_price,
             vwap=vwap_value,
+            bullish_reversal=bullish_reversal,
             summary="The lower timeframe trigger confirmed a rebound from the pullback.",
         )
+
+    def _calculate_stop_price(self, entry_price: int, support_price: int | None) -> int:
+        """Use the tighter of the fixed stop and the support-based stop."""
+
+        percent_stop = max(min(int(entry_price * (1 - self.risk.stop_loss_pct)), entry_price - 1), 1)
+        stop_candidates = [percent_stop]
+        if support_price is not None:
+            support_stop = max(
+                min(int(support_price * (1 - self.config.support_tolerance_pct)), entry_price - 1),
+                1,
+            )
+            stop_candidates.append(support_stop)
+        return max(stop_candidates)
+
+    def _evaluate_support_zone(
+        self,
+        *,
+        pullback_low: int,
+        breakout_price: int | None,
+        ma_fast: Any,
+    ) -> tuple[int | None, str | None, bool]:
+        """Evaluate whether the pullback respected the configured support anchors."""
+
+        ma_fast_value = int(float(ma_fast)) if ma_fast is not None else None
+        reference = self.config.support_reference
+        candidates: list[tuple[int, str]] = []
+        if breakout_price is not None and breakout_price > 0:
+            candidates.append((breakout_price, "breakout"))
+        if ma_fast_value is not None and ma_fast_value > 0:
+            candidates.append((ma_fast_value, "ma_fast"))
+
+        if reference == "breakout":
+            candidates = [item for item in candidates if item[1] == "breakout"]
+        elif reference == "ma_fast":
+            candidates = [item for item in candidates if item[1] == "ma_fast"]
+
+        if not candidates:
+            return None, None, True
+
+        passed_candidates = [
+            item for item in candidates if pullback_low >= item[0] * (1 - self.config.support_tolerance_pct)
+        ]
+        if reference == "both":
+            support_ok = len(passed_candidates) == len(candidates)
+            chosen = max(candidates, key=lambda item: item[0])
+        else:
+            support_ok = len(passed_candidates) > 0
+            chosen = max(passed_candidates or candidates, key=lambda item: item[0])
+
+        return chosen[0], reference, support_ok
+
+    def _build_annotations(
+        self,
+        *,
+        entry_price: int | None,
+        stop_price: int | None,
+        target_price: int | None,
+        breakout_price: int | None,
+        support_price: int | None,
+    ) -> list[PriceLevel]:
+        annotations: list[PriceLevel] = []
+        if entry_price is not None:
+            annotations.append(PriceLevel(label="Entry", price=entry_price, kind="entry"))
+        if stop_price is not None:
+            annotations.append(PriceLevel(label="Stop", price=stop_price, kind="stop"))
+        if target_price is not None:
+            annotations.append(PriceLevel(label="Target", price=target_price, kind="target"))
+        if breakout_price is not None:
+            annotations.append(PriceLevel(label="Breakout", price=breakout_price, kind="breakout"))
+        if support_price is not None:
+            annotations.append(PriceLevel(label="Support", price=support_price, kind="support"))
+        return annotations
 
 
 def moving_average(values: list[int], length: int) -> float:
@@ -299,3 +461,13 @@ def calculate_vwap(bars: list[TradeBar]) -> float:
         denominator += bar.volume
     return numerator / denominator if denominator else 0.0
 
+
+def to_int_or_none(value: Any) -> int | None:
+    """Convert strategy metric values to int when possible."""
+
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None

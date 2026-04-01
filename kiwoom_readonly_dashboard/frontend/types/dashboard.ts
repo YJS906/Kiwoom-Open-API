@@ -166,11 +166,16 @@ export type StrategyConfig = {
   recent_breakout_days: number;
   daily_ma_fast: number;
   daily_ma_slow: number;
+  breakout_volume_multiplier: number;
+  breakout_volume_lookback_days: number;
   pullback_min_ratio: number;
   pullback_max_ratio: number;
   volume_dryup_ratio: number;
+  support_reference: "breakout" | "ma_fast" | "either" | "both";
+  support_tolerance_pct: number;
   trigger_timeframe: "15m" | "5m";
   use_vwap: boolean;
+  require_bullish_reversal_candle: boolean;
   min_daily_bars: number;
   min_intraday_bars: number;
   breakout_lookback_bars_60m: number;
@@ -403,6 +408,7 @@ export type StrategyDashboardSnapshot = {
   session: StrategySessionState;
   config: TradingConfig;
   status: StrategyStatus;
+  scanner_source: string;
   updated_at: string;
 };
 
@@ -414,6 +420,13 @@ export type StrategySymbolDetail = {
   charts: Record<string, TradeBar[]>;
   levels: PriceLevel[];
   explanation_cards: string[];
+  updated_at: string;
+};
+
+export type StrategyChartSeries = {
+  symbol: string;
+  timeframe: StrategyTimeframe;
+  bars: TradeBar[];
   updated_at: string;
 };
 

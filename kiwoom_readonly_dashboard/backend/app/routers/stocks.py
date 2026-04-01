@@ -18,11 +18,14 @@ async def search_stocks(
 ) -> StockSearchResponse:
     """Return stock search suggestions."""
 
-    items = await request.app.state.kiwoom_client.search_stocks(q)
-    return StockSearchResponse(
-        items=items,
-        updated_at=request.app.state.kiwoom_client.last_updated_at or now_kr(),
-    )
+    try:
+        items = await request.app.state.kiwoom_client.search_stocks(q)
+        return StockSearchResponse(
+            items=items,
+            updated_at=request.app.state.kiwoom_client.last_updated_at or now_kr(),
+        )
+    except KiwoomRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/{symbol}", response_model=StockDetailResponse)

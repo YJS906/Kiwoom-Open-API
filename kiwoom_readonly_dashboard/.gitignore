@@ -1,0 +1,13 @@
+.env
+.env.local
+.venv/
+backend/.venv/
+frontend/node_modules/
+frontend/.next/
+backend/.pytest_cache/
+backend/__pycache__/
+backend/.mypy_cache/
+*.pyc
+runtime/
+logs/
+

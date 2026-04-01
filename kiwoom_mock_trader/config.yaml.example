@@ -1,0 +1,47 @@
+environment: mock
+
+api:
+  mock_base_url: "https://mockapi.kiwoom.com"
+  production_base_url: "https://api.kiwoom.com"
+  mock_websocket_url: "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+  production_websocket_url: "wss://api.kiwoom.com:10000/api/dostk/websocket"
+  request_timeout_seconds: 15
+
+trading:
+  symbol: "005930"
+  exchange: "KRX"
+  default_order_type: "limit"
+  poll_interval_seconds: 30
+  market_open_time: "09:05"
+  market_close_time: "15:10"
+  timezone: "Asia/Seoul"
+
+safety:
+  dry_run: true
+  use_mock_only: true
+  stop_on_error: true
+  fail_if_account_mismatch: true
+
+risk:
+  max_daily_orders: 3
+  max_position_count: 1
+  max_order_amount_krw: 100000
+  max_daily_loss_krw: 30000
+
+strategy:
+  name: "previous_close_demo"
+  buy_above_prev_close_pct: 0.01
+  take_profit_pct: 0.03
+  stop_loss_pct: 0.02
+
+runtime:
+  state_dir: ".runtime"
+  token_cache_file: ".runtime/token_mock.json"
+  state_file: ".runtime/state.json"
+  orders_dir: ".runtime/orders"
+
+logging:
+  level: "INFO"
+  directory: "logs"
+  file_name: "bot.log"
+

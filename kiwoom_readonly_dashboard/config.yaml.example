@@ -1,0 +1,60 @@
+scanner:
+  condition_name: "52주 신고가"
+  refresh_seconds: 45
+  candidate_ttl_minutes: 240
+  min_daily_history: 260
+  fallback_symbols:
+    - "005930"
+    - "000660"
+
+strategy:
+  recent_breakout_days: 20
+  daily_ma_fast: 20
+  daily_ma_slow: 60
+  pullback_min_ratio: 0.30
+  pullback_max_ratio: 0.50
+  volume_dryup_ratio: 0.70
+  trigger_timeframe: "15m"
+  use_vwap: true
+  min_daily_bars: 120
+  min_intraday_bars: 40
+  breakout_lookback_bars_60m: 18
+  rally_window_bars_60m: 24
+
+risk:
+  buy_cash_pct_of_remaining: 0.20
+  max_position_pct: 0.25
+  max_positions: 3
+  max_daily_new_entries: 2
+  max_daily_loss_krw: 50000
+  reentry_cooldown_minutes: 120
+  stop_loss_pct: 0.03
+  take_profit_r_multiple: 2.0
+  no_new_entry_after: "14:30"
+  block_reentry_after_stop: true
+  block_high_volatility: true
+  max_intraday_change_pct: 18.0
+  exclude_trading_halt: true
+  exclude_admin_issue: true
+  exclude_etf_etn: true
+
+execution:
+  paper_trading: true
+  auto_buy_enabled: false
+  use_mock_only: true
+  real_order_enabled: false
+  order_type: "market"
+  slippage_bps: 10
+  max_retry_count: 1
+  fill_poll_seconds: 2
+  manual_signal_execution: true
+
+session:
+  timezone: "Asia/Seoul"
+  market_open_time: "09:05"
+  market_close_time: "15:20"
+
+admin:
+  enable_runtime_overrides: true
+  replay_default_days: 60
+

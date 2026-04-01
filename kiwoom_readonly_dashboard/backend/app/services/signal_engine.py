@@ -1,0 +1,520 @@
+"""Strategy engine orchestration."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from copy import deepcopy
+from datetime import timedelta
+from typing import Any
+from uuid import uuid4
+
+from app.core.config import Settings, save_trading_overrides
+from app.models.schemas import AccountSummary, HoldingItem
+from app.models.trading import (
+    AdminConfigPatch,
+    CandidateStock,
+    FillEvent,
+    OrderIntent,
+    ReplayPoint,
+    ReplayResponse,
+    SessionState,
+    SignalEvent,
+    StrategyDashboardSnapshot,
+    StrategyDecision,
+    StrategyRuntimeState,
+    StrategyStatus,
+    StrategySymbolDetail,
+    TradingConfig,
+    now_kr,
+)
+from app.services.bar_builder import BarBuilderService
+from app.services.high52_scanner import High52Scanner
+from app.services.kiwoom_client import KiwoomClientService
+from app.services.order_executor import OrderExecutor
+from app.services.position_manager import PositionManager
+from app.services.pullback_strategy import PullbackStrategyEngine
+from app.services.risk_manager import RiskManager
+from app.services.session_guard import SessionGuard
+
+
+class SignalEngine:
+    """Continuously refresh scanner candidates and generate signals."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        config: TradingConfig,
+        kiwoom_client: KiwoomClientService,
+        scanner: High52Scanner,
+        bar_builder: BarBuilderService,
+        strategy: PullbackStrategyEngine,
+        risk_manager: RiskManager,
+        order_executor: OrderExecutor,
+        position_manager: PositionManager,
+        session_guard: SessionGuard,
+        logger: logging.Logger,
+    ) -> None:
+        self.settings = settings
+        self.config = config
+        self.kiwoom_client = kiwoom_client
+        self.scanner = scanner
+        self.bar_builder = bar_builder
+        self.strategy = strategy
+        self.risk_manager = risk_manager
+        self.order_executor = order_executor
+        self.position_manager = position_manager
+        self.session_guard = session_guard
+        self.logger = logger.getChild("signal_engine")
+        self.state = self._load_state()
+        self._status = StrategyStatus(
+            connected=False,
+            status="idle",
+            detail="Waiting for the first strategy refresh.",
+        )
+        self._recent_errors: list[str] = []
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task[None] | None = None
+        self._last_decisions: dict[str, StrategyDecision] = {}
+
+    async def start(self) -> None:
+        """Start the background refresh loop."""
+
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run_loop(), name="strategy-signal-engine")
+
+    async def shutdown(self) -> None:
+        """Stop the background refresh loop."""
+
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def refresh_now(self) -> StrategyDashboardSnapshot:
+        """Run one strategy refresh immediately."""
+
+        async with self._lock:
+            await self._refresh_once()
+            return self._build_snapshot()
+
+    async def get_snapshot(self) -> StrategyDashboardSnapshot:
+        """Return the latest snapshot, refreshing lazily if needed."""
+
+        if self.state.session.last_scan_at is None:
+            return await self.refresh_now()
+        return self._build_snapshot()
+
+    async def get_symbol_detail(self, symbol: str) -> StrategySymbolDetail:
+        """Return strategy details and charts for a single symbol."""
+
+        normalized = symbol.strip().upper()[-6:]
+        candidate = self.state.candidates.get(normalized)
+        charts = await self.bar_builder.get_strategy_bundle(normalized)
+        decision = self._last_decisions.get(normalized)
+        explanation_cards: list[str] = []
+        if decision:
+            explanation_cards.append(decision.summary)
+            explanation_cards.extend(decision.reasons)
+        if candidate and candidate.blocked_reason:
+            explanation_cards.append(f"Blocked: {candidate.blocked_reason}")
+        return StrategySymbolDetail(
+            symbol=normalized,
+            name=candidate.name if candidate else (await self.kiwoom_client.find_company_name(normalized)),
+            candidate=candidate,
+            decision=decision,
+            charts=charts,
+            levels=decision.annotations if decision else [],
+            explanation_cards=explanation_cards,
+        )
+
+    async def replay(self, symbol: str) -> ReplayResponse:
+        """Minimal replay endpoint using the daily filter over history."""
+
+        charts = await self.bar_builder.get_strategy_bundle(symbol)
+        daily = charts["daily"]
+        points: list[ReplayPoint] = []
+        start_index = max(60, self.config.strategy.daily_ma_slow)
+        for index in range(start_index, len(daily)):
+            decision = self.strategy.evaluate(
+                symbol=symbol,
+                daily_bars=daily[: index + 1],
+                bars_60m=charts["60m"],
+                trigger_bars=charts[self.config.strategy.trigger_timeframe],
+            )
+            action = "hold"
+            if decision.stage == "trigger":
+                action = "entry_ready"
+            elif decision.stage == "buy_signal":
+                action = "buy_signal"
+            elif not decision.passed:
+                action = "blocked"
+            points.append(
+                ReplayPoint(
+                    time=daily[index].time,
+                    close=daily[index].close,
+                    action=action,
+                    summary=decision.summary,
+                )
+            )
+        return ReplayResponse(
+            symbol=symbol,
+            timeframe="daily",
+            points=points[-self.config.admin.replay_default_days :],
+            decision=self._last_decisions.get(symbol),
+        )
+
+    async def execute_signal(self, signal_id: str) -> dict[str, Any]:
+        """Manually execute a queued signal."""
+
+        async with self._lock:
+            signal = next((item for item in self.state.signals if item.id == signal_id), None)
+            if signal is None:
+                raise RuntimeError("Signal not found.")
+            if signal.status not in {"queued", "blocked"}:
+                raise RuntimeError("The signal is no longer executable.")
+            return await self._execute_signal_locked(signal)
+
+    async def update_runtime_config(self, patch: AdminConfigPatch) -> TradingConfig:
+        """Persist runtime overrides and rebuild the in-memory config."""
+
+        merged = save_trading_overrides(self.settings, patch.model_dump(exclude_none=True))
+        self.config = merged
+        self.strategy = PullbackStrategyEngine(merged.strategy, merged.risk)
+        self.session_guard = SessionGuard(merged.session)
+        self.risk_manager = RiskManager(merged.risk, self.session_guard)
+        self.order_executor.config = merged.execution
+        self.scanner.config = merged.scanner
+        return merged
+
+    def get_status(self) -> StrategyStatus:
+        """Return engine status for health panels."""
+
+        return deepcopy(self._status)
+
+    def get_recent_errors(self) -> list[str]:
+        """Return recent engine errors."""
+
+        return list(self._recent_errors)
+
+    async def _run_loop(self) -> None:
+        while True:
+            try:
+                await self.refresh_now()
+            except Exception as exc:
+                self._remember_error(str(exc))
+                self._status = StrategyStatus(
+                    connected=False,
+                    status="degraded",
+                    last_updated_at=now_kr(),
+                    detail=str(exc),
+                )
+                self.logger.exception("Strategy refresh failed: %s", exc)
+            await asyncio.sleep(max(self.config.scanner.refresh_seconds, 5))
+
+    async def _refresh_once(self) -> None:
+        summary = await self.kiwoom_client.get_account_summary()
+        holdings_response = await self.kiwoom_client.get_holdings()
+        self._prepare_session(summary, holdings_response.items)
+
+        refreshed_candidates = await self.scanner.refresh(self.state.candidates)
+        quotes_for_positions: dict[str, int] = {}
+        seen_symbols = {candidate.symbol for candidate in refreshed_candidates}
+
+        for candidate in refreshed_candidates:
+            bundle = await self.bar_builder.get_strategy_bundle(candidate.symbol)
+            decision = self.strategy.evaluate(
+                symbol=candidate.symbol,
+                daily_bars=bundle["daily"],
+                bars_60m=bundle["60m"],
+                trigger_bars=bundle[self.config.strategy.trigger_timeframe],
+            )
+            self._last_decisions[candidate.symbol] = decision
+            quotes_for_positions[candidate.symbol] = candidate.last_price or bundle["daily"][-1].close
+            updated_candidate = await self._apply_candidate_decision(
+                candidate,
+                decision,
+                summary,
+                holdings_response.items,
+            )
+            self.state.candidates[updated_candidate.symbol] = updated_candidate
+
+        for symbol in list(self.state.candidates):
+            if symbol not in seen_symbols and self.state.candidates[symbol].state not in {"ordered", "exited"}:
+                self.state.candidates.pop(symbol, None)
+
+        self.state.positions = self.position_manager.mark_to_market(self.state.positions, quotes_for_positions)
+        self._update_daily_loss()
+        await self._evaluate_exit_signals()
+        self.state.session.last_scan_at = now_kr()
+        self.state.session.updated_at = now_kr()
+        self._status = StrategyStatus(
+            connected=True,
+            status="running",
+            last_updated_at=self.state.session.last_scan_at,
+            detail=f"Candidates={len(self.state.candidates)} source={self.scanner.last_source}",
+        )
+        self._trim_state()
+        self._save_state()
+
+    def _prepare_session(self, summary: AccountSummary, holdings: list[HoldingItem]) -> None:
+        today = self.session_guard.today()
+        now = now_kr()
+        if self.state.session.trade_date != today:
+            self.state.session = SessionState(
+                trade_date=today,
+                paper_cash_balance_krw=summary.deposit,
+                actual_available_cash_krw=summary.deposit,
+                actual_holdings_count=len(holdings),
+                market_open=self.session_guard.is_market_open(),
+                can_enter_new_positions=self.session_guard.can_enter_new_positions(
+                    self.config.risk.no_new_entry_after
+                ),
+                updated_at=now,
+            )
+            return
+
+        session = self.state.session
+        session.market_open = self.session_guard.is_market_open()
+        session.can_enter_new_positions = self.session_guard.can_enter_new_positions(
+            self.config.risk.no_new_entry_after
+        )
+        session.actual_available_cash_krw = summary.deposit
+        session.actual_holdings_count = len(holdings)
+        if session.paper_cash_balance_krw <= 0:
+            session.paper_cash_balance_krw = summary.deposit
+        session.updated_at = now
+
+    async def _apply_candidate_decision(
+        self,
+        candidate: CandidateStock,
+        decision: StrategyDecision,
+        summary: AccountSummary,
+        holdings: list[HoldingItem],
+    ) -> CandidateStock:
+        current = candidate.model_copy(deep=True)
+        active_position = self.state.positions.get(candidate.symbol)
+        if active_position is not None:
+            current.state = "ordered"
+            current.blocked_reason = None
+            return current
+
+        if not decision.passed:
+            current.state = "watching" if decision.stage != "insufficient_data" else "new"
+            current.blocked_reason = None
+            return current
+
+        metadata = await self.kiwoom_client.get_stock_metadata(candidate.symbol)
+        quote = await self.kiwoom_client.get_stock_quote(candidate.symbol)
+        risk = self.risk_manager.evaluate_entry(
+            symbol=candidate.symbol,
+            entry_price=decision.entry_price or quote.current_price,
+            account_summary=summary,
+            actual_holdings=holdings,
+            paper_positions=self.state.positions,
+            session=self.state.session,
+            quote=quote,
+            metadata=metadata,
+        )
+        if not self._has_open_signal(candidate.symbol, "entry"):
+            signal = SignalEvent(
+                id=f"sig-{uuid4().hex[:12]}",
+                symbol=candidate.symbol,
+                name=candidate.name,
+                signal_type="entry",
+                status="queued" if risk.allowed else "blocked",
+                candidate_state="signal_ready" if risk.allowed else "blocked",
+                trigger_timeframe=decision.entry_timeframe,
+                decision=decision,
+                risk=risk,
+                explanation=decision.summary,
+            )
+            self.state.signals.insert(0, signal)
+            self.state.session.last_signal_at = signal.created_at
+            if risk.allowed and self.config.execution.auto_buy_enabled:
+                await self._execute_signal_locked(signal)
+
+        current.state = "signal_ready" if risk.allowed else "blocked"
+        current.blocked_reason = None if risk.allowed else "; ".join(risk.reasons)
+        return current
+
+    async def _evaluate_exit_signals(self) -> None:
+        for symbol, position in list(self.state.positions.items()):
+            current_price = position.current_price
+            reason: str | None = None
+            if position.stop_price and current_price <= position.stop_price:
+                reason = "Stop-loss level was reached."
+            elif position.target_price and current_price >= position.target_price:
+                reason = "Take-profit level was reached."
+            if reason is None or self._has_open_signal(symbol, "exit"):
+                continue
+            decision = StrategyDecision(
+                symbol=symbol,
+                passed=True,
+                stage="exit_signal",
+                summary=reason,
+                reasons=[reason],
+                entry_price=current_price,
+                stop_price=position.stop_price,
+                target_price=position.target_price,
+            )
+            signal = SignalEvent(
+                id=f"sig-{uuid4().hex[:12]}",
+                symbol=symbol,
+                name=position.name,
+                signal_type="exit",
+                status="queued",
+                candidate_state="ordered",
+                decision=decision,
+                explanation=reason,
+            )
+            self.state.signals.insert(0, signal)
+            if self.config.execution.auto_buy_enabled:
+                await self._execute_signal_locked(signal)
+
+    async def _execute_signal_locked(self, signal: SignalEvent) -> dict[str, Any]:
+        candidate = self.state.candidates.get(signal.symbol)
+        current_price = candidate.last_price if candidate and candidate.last_price else signal.decision.entry_price
+        if not current_price:
+            quote = await self.kiwoom_client.get_stock_quote(signal.symbol)
+            current_price = quote.current_price
+
+        intent = self._build_intent(signal)
+        result = await self.order_executor.execute(signal, intent, current_price)
+        self.state.orders.insert(0, result.intent)
+        signal.order_intent_id = result.intent.id
+        signal.status = "ordered" if result.fill is None else "filled"
+        signal.updated_at = now_kr()
+
+        payload: dict[str, Any] = {
+            "signal": signal.model_dump(mode="json"),
+            "order": result.intent.model_dump(mode="json"),
+        }
+        if result.fill is not None:
+            self.state.fills.insert(0, result.fill)
+            self.state.positions, realized = self.position_manager.apply_fill(
+                self.state.positions,
+                result.fill,
+                result.intent,
+            )
+            self._after_fill(signal, result.intent, result.fill)
+            payload["fill"] = result.fill.model_dump(mode="json")
+            payload["realized_pnl_krw"] = realized
+        self._trim_state()
+        self._save_state()
+        return payload
+
+    def _build_intent(self, signal: SignalEvent) -> OrderIntent:
+        side = "buy" if signal.signal_type == "entry" else "sell"
+        quantity = signal.risk.quantity if side == "buy" and signal.risk else 0
+        if side == "sell":
+            position = self.state.positions.get(signal.symbol)
+            quantity = position.quantity if position else 0
+        if quantity <= 0:
+            raise RuntimeError("Calculated quantity is zero.")
+        return OrderIntent(
+            id=f"ord-{uuid4().hex[:12]}",
+            signal_id=signal.id,
+            symbol=signal.symbol,
+            name=signal.name,
+            side=side,
+            quantity=quantity,
+            order_type=self.config.execution.order_type,
+            desired_price=signal.decision.entry_price,
+            trigger_price=signal.decision.breakout_price,
+            stop_price=signal.decision.stop_price,
+            target_price=signal.decision.target_price,
+            paper=self.config.execution.paper_trading,
+            state="queued",
+            reason=signal.explanation,
+        )
+
+    def _after_fill(self, signal: SignalEvent, intent: OrderIntent, fill: FillEvent) -> None:
+        if intent.side == "buy":
+            self.state.session.paper_cash_balance_krw = max(
+                self.state.session.paper_cash_balance_krw - fill.fill_value_krw,
+                0,
+            )
+            self.state.session.daily_new_entries += 1
+            self.state.session.last_order_at = fill.filled_at
+            candidate = self.state.candidates.get(signal.symbol)
+            if candidate:
+                candidate.state = "ordered"
+                candidate.updated_at = fill.filled_at
+            return
+
+        self.state.session.paper_cash_balance_krw += fill.fill_value_krw
+        if signal.decision.summary.startswith("Stop-loss"):
+            self.state.session.recent_stop_loss_symbols.append(signal.symbol)
+            cooldown_until = self.session_guard.now() + timedelta(minutes=self.config.risk.reentry_cooldown_minutes)
+            self.state.session.cooldown_until[signal.symbol] = cooldown_until.isoformat()
+        candidate = self.state.candidates.get(signal.symbol)
+        if candidate:
+            candidate.state = "exited"
+            candidate.updated_at = fill.filled_at
+
+    def _update_daily_loss(self) -> None:
+        total_unrealized = sum(position.unrealized_pnl_krw for position in self.state.positions.values())
+        total_realized = sum(position.realized_pnl_krw for position in self.state.positions.values())
+        total_pnl = total_realized + total_unrealized
+        self.state.session.daily_loss_krw = abs(total_pnl) if total_pnl < 0 else 0
+
+    def _has_open_signal(self, symbol: str, signal_type: str) -> bool:
+        for signal in self.state.signals:
+            if signal.symbol == symbol and signal.signal_type == signal_type and signal.status in {
+                "queued",
+                "ordered",
+                "filled",
+            }:
+                return True
+        return False
+
+    def _build_snapshot(self) -> StrategyDashboardSnapshot:
+        candidates = list(self.state.candidates.values())
+        return StrategyDashboardSnapshot(
+            candidates=candidates,
+            watching=[item for item in candidates if item.state == "watching"],
+            signal_ready=[item for item in candidates if item.state == "signal_ready"],
+            blocked=[item for item in candidates if item.state == "blocked"],
+            queued_signals=[item for item in self.state.signals if item.status in {"queued", "blocked"}],
+            orders=self.state.orders,
+            fills=self.state.fills,
+            positions=list(self.state.positions.values()),
+            session=self.state.session,
+            config=self.config,
+            status=self._status,
+        )
+
+    def _trim_state(self) -> None:
+        self.state.signals = self.state.signals[:100]
+        self.state.orders = self.state.orders[:100]
+        self.state.fills = self.state.fills[:100]
+
+    def _remember_error(self, message: str) -> None:
+        self._recent_errors.append(message)
+        self._recent_errors = self._recent_errors[-10:]
+        self.state.session.last_error = message
+
+    def _load_state(self) -> StrategyRuntimeState:
+        path = self.settings.trading_state_file
+        if not path.exists():
+            return StrategyRuntimeState()
+        try:
+            return StrategyRuntimeState(**json.loads(path.read_text(encoding="utf-8")))
+        except Exception as exc:
+            self.logger.warning("Ignoring invalid strategy runtime state: %s", exc)
+            return StrategyRuntimeState()
+
+    def _save_state(self) -> None:
+        self.settings.trading_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.trading_state_file.write_text(
+            json.dumps(self.state.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+

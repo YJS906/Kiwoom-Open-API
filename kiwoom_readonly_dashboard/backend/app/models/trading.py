@@ -75,7 +75,7 @@ class RiskConfig(BaseModel):
     max_daily_loss_krw: int = 50_000
     reentry_cooldown_minutes: int = 120
     stop_loss_pct: float = 0.03
-    take_profit_r_multiple: float = 2.0
+    take_profit_pct: float = 0.04
     no_new_entry_after: str = "14:30"
     block_reentry_after_stop: bool = True
     block_high_volatility: bool = True

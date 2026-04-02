@@ -26,6 +26,7 @@ export function AdminSettingsPanel({
   const [breakoutVolumeMultiplier, setBreakoutVolumeMultiplier] = useState("2.0");
   const [supportReference, setSupportReference] = useState<"breakout" | "ma_fast" | "either" | "both">("either");
   const [supportTolerancePct, setSupportTolerancePct] = useState("0.02");
+  const [takeProfitPct, setTakeProfitPct] = useState("0.04");
   const [autoBuyEnabled, setAutoBuyEnabled] = useState(false);
   const [paperTrading, setPaperTrading] = useState(true);
   const [mockOrderEnabled, setMockOrderEnabled] = useState(false);
@@ -39,6 +40,7 @@ export function AdminSettingsPanel({
     setBreakoutVolumeMultiplier(String(config.strategy.breakout_volume_multiplier));
     setSupportReference(config.strategy.support_reference);
     setSupportTolerancePct(String(config.strategy.support_tolerance_pct));
+    setTakeProfitPct(String(config.risk.take_profit_pct));
     setAutoBuyEnabled(config.execution.auto_buy_enabled);
     setPaperTrading(config.execution.paper_trading);
     setMockOrderEnabled(config.execution.mock_order_enabled);
@@ -109,6 +111,12 @@ export function AdminSettingsPanel({
             onChange={(event) => setSupportTolerancePct(event.target.value)}
           />
         </Field>
+        <Field label="Take profit pct">
+          <Input
+            value={takeProfitPct}
+            onChange={(event) => setTakeProfitPct(event.target.value)}
+          />
+        </Field>
         <Field label="Order type">
           <select
             value={orderType}
@@ -154,6 +162,9 @@ export function AdminSettingsPanel({
                 breakout_volume_multiplier: Number(breakoutVolumeMultiplier) || 2.0,
                 support_reference: supportReference,
                 support_tolerance_pct: Number(supportTolerancePct) || 0.02
+              },
+              risk: {
+                take_profit_pct: Number(takeProfitPct) || 0.04
               },
               execution: {
                 auto_buy_enabled: autoBuyEnabled,

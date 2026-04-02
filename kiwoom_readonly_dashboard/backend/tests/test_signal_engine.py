@@ -162,19 +162,22 @@ def make_trigger_bars() -> list[TradeBar]:
 
 
 class StubKiwoomClient:
+    def __init__(self, holdings: list[HoldingItem] | None = None) -> None:
+        self._holdings = holdings or []
+
     async def get_account_summary(self) -> AccountSummary:
         return AccountSummary(
             total_evaluation_amount=1_000_000,
             total_profit_loss=0,
             total_profit_rate=0.0,
-            holdings_count=0,
+            holdings_count=len(self._holdings),
             deposit=1_000_000,
             estimated_assets=1_000_000,
             updated_at=datetime(2026, 4, 2, 9, 0, tzinfo=SEOUL),
         )
 
     async def get_holdings(self):
-        return type("Holdings", (), {"items": []})()
+        return type("Holdings", (), {"items": self._holdings})()
 
     async def get_stock_quote(self, symbol: str) -> StockQuote:
         return StockQuote(
@@ -207,8 +210,10 @@ class StubKiwoomClient:
 class StubScanner:
     last_source = "test"
 
-    def __init__(self) -> None:
+    def __init__(self, last_price: int = 151, change_rate: float = 1.2) -> None:
         self.config = ScannerConfig()
+        self.last_price = last_price
+        self.change_rate = change_rate
 
     async def refresh(self, existing):
         return [
@@ -217,8 +222,8 @@ class StubScanner:
                 name="Samsung Electronics",
                 source="test",
                 state=existing.get("005930").state if "005930" in existing else "new",
-                last_price=151,
-                change_rate=1.2,
+                last_price=self.last_price,
+                change_rate=self.change_rate,
             )
         ]
 
@@ -247,7 +252,15 @@ class StubBarBuilder:
         }
 
 
-def build_engine(settings, logger, monkeypatch, config: TradingConfig | None = None, bar_builder=None) -> SignalEngine:
+def build_engine(
+    settings,
+    logger,
+    monkeypatch,
+    config: TradingConfig | None = None,
+    bar_builder=None,
+    kiwoom_client=None,
+    scanner=None,
+) -> SignalEngine:
     config = config or TradingConfig()
     config.strategy.min_intraday_bars = 20
     config.session.market_open_time = "00:00"
@@ -255,15 +268,17 @@ def build_engine(settings, logger, monkeypatch, config: TradingConfig | None = N
     config.risk.no_new_entry_after = "23:59"
     session_guard = SessionGuard(config.session)
     bar_builder = bar_builder or StubBarBuilder()
+    kiwoom_client = kiwoom_client or StubKiwoomClient()
+    scanner = scanner or StubScanner()
     engine = SignalEngine(
         settings,
         config,
-        StubKiwoomClient(),
-        StubScanner(),
+        kiwoom_client,
+        scanner,
         bar_builder,
         PullbackStrategyEngine(config.strategy, config.risk),
         RiskManager(config.risk, session_guard),
-        OrderExecutor(settings, config.execution, StubKiwoomClient(), PaperBroker(), logger),
+        OrderExecutor(settings, config.execution, kiwoom_client, PaperBroker(), logger),
         PositionManager(),
         session_guard,
         logger,
@@ -337,3 +352,47 @@ async def test_signal_engine_resets_paper_state_before_mock_order_mode(settings,
     assert engine.state.signals == []
     assert engine.state.session.paper_cash_balance_krw == 0
     assert engine.state.session.daily_new_entries == 0
+
+
+async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_exit(
+    settings,
+    logger,
+    monkeypatch,
+) -> None:
+    config = TradingConfig()
+    config.execution.paper_trading = False
+    config.execution.auto_buy_enabled = False
+    config.risk.take_profit_pct = 0.04
+    holding = HoldingItem(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        available_quantity=10,
+        average_price=1000,
+        current_price=1045,
+        evaluation_profit_loss=450,
+        profit_rate=4.5,
+        market_name="KOSPI",
+    )
+    engine = build_engine(
+        settings,
+        logger,
+        monkeypatch,
+        config=config,
+        kiwoom_client=StubKiwoomClient(holdings=[holding]),
+        scanner=StubScanner(last_price=1045, change_rate=4.5),
+    )
+
+    snapshot = await engine.refresh_now()
+
+    assert "005930" in engine.state.positions
+    position = engine.state.positions["005930"]
+    assert position.source == "account"
+    assert position.target_price == 1040
+    assert position.stop_price == 970
+    assert any(
+        signal.symbol == "005930"
+        and signal.signal_type == "exit"
+        and signal.explanation == "Take-profit level was reached."
+        for signal in snapshot.queued_signals
+    )

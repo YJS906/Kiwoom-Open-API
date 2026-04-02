@@ -219,7 +219,7 @@ export type RiskConfig = {
   max_daily_loss_krw: number;
   reentry_cooldown_minutes: number;
   stop_loss_pct: number;
-  take_profit_r_multiple: number;
+  take_profit_pct: number;
   no_new_entry_after: string;
   block_reentry_after_stop: boolean;
   block_high_volatility: boolean;

@@ -145,8 +145,7 @@ class PullbackStrategyEngine:
         breakout_price = decision_breakout_price
         support_price = pullback.support_price
         stop_price = self._calculate_stop_price(entry_price, support_price)
-        risk_per_share = max(entry_price - stop_price, 1)
-        target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
+        target_price = self._calculate_target_price(entry_price)
 
         return StrategyDecision(
             symbol=symbol,
@@ -233,8 +232,7 @@ class PullbackStrategyEngine:
         entry_price = max(latest.close, breakout_price)
         support_price = to_int_or_none(daily_filter.get("ma_fast"))
         stop_price = self._calculate_stop_price(entry_price, support_price)
-        risk_per_share = max(entry_price - stop_price, 1)
-        target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
+        target_price = self._calculate_target_price(entry_price)
         return StrategyDecision(
             symbol=symbol,
             passed=True,
@@ -341,8 +339,7 @@ class PullbackStrategyEngine:
 
         entry_price = max(latest.close, breakout_threshold)
         stop_price = self._calculate_stop_price(entry_price, box_low)
-        risk_per_share = max(entry_price - stop_price, 1)
-        target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
+        target_price = self._calculate_target_price(entry_price)
         return StrategyDecision(
             symbol=symbol,
             passed=True,
@@ -569,6 +566,12 @@ class PullbackStrategyEngine:
             )
             stop_candidates.append(support_stop)
         return max(stop_candidates)
+
+    def _calculate_target_price(self, entry_price: int) -> int:
+        """Use a fixed take-profit percentage from the entry price."""
+
+        take_profit = max(int(round(entry_price * (1 + self.risk.take_profit_pct))), entry_price + 1)
+        return take_profit
 
     def _evaluate_support_zone(
         self,

@@ -37,7 +37,10 @@ export function StrategyParamsPanel({ snapshot }: { snapshot: StrategyDashboardS
             />
             <Metric label="Order Type" value={snapshot.config.execution.order_type} />
             <Metric label="Stop Loss" value={`${(snapshot.config.risk.stop_loss_pct * 100).toFixed(1)}%`} />
-            <Metric label="Take Profit" value={`${snapshot.config.risk.take_profit_r_multiple.toFixed(1)}R`} />
+            <Metric
+              label="Take Profit"
+              value={`${(snapshot.config.risk.take_profit_pct * 100).toFixed(1)}%`}
+            />
             <Metric label="Paper Cash" value={formatKrw(snapshot.session.paper_cash_balance_krw)} />
             <Metric label="Daily Loss" value={formatKrw(snapshot.session.daily_loss_krw)} />
           </div>

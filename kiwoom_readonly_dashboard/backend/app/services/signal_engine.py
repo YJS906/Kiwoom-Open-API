@@ -17,6 +17,7 @@ from app.models.trading import (
     CandidateStock,
     FillEvent,
     OrderIntent,
+    PositionState,
     ReplayPoint,
     ReplayResponse,
     SessionState,
@@ -253,6 +254,7 @@ class SignalEngine:
         summary = await self.kiwoom_client.get_account_summary()
         holdings_response = await self.kiwoom_client.get_holdings()
         self._prepare_session(summary, holdings_response.items)
+        self._sync_account_positions(holdings_response.items)
 
         refreshed_candidates = await self.scanner.refresh(self.state.candidates)
         quotes_for_positions: dict[str, int] = {}
@@ -349,6 +351,48 @@ class SignalEngine:
         if session.paper_cash_balance_krw <= 0:
             session.paper_cash_balance_krw = summary.deposit
         session.updated_at = now
+
+    def _sync_account_positions(self, holdings: list[HoldingItem]) -> None:
+        """Mirror actual Kiwoom account holdings into runtime positions for exit logic."""
+
+        if self.config.execution.paper_trading:
+            return
+
+        now = now_kr()
+        previous_account_positions = {
+            symbol: position
+            for symbol, position in self.state.positions.items()
+            if position.source == "account"
+        }
+        updated_positions = {
+            symbol: position
+            for symbol, position in self.state.positions.items()
+            if position.source != "account"
+        }
+
+        for holding in holdings:
+            if holding.quantity <= 0:
+                continue
+
+            previous = previous_account_positions.get(holding.symbol)
+            updated_positions[holding.symbol] = PositionState(
+                symbol=holding.symbol,
+                name=holding.name,
+                quantity=holding.quantity,
+                avg_price=holding.average_price,
+                current_price=holding.current_price,
+                market_value_krw=holding.current_price * holding.quantity,
+                unrealized_pnl_krw=holding.evaluation_profit_loss,
+                realized_pnl_krw=previous.realized_pnl_krw if previous else 0,
+                stop_price=self._calculate_account_stop_price(holding.average_price, previous.stop_price if previous else None),
+                target_price=self._calculate_account_target_price(holding.average_price),
+                source="account",
+                opened_at=self._resolve_account_opened_at(holding.symbol, previous, now),
+                last_updated_at=now,
+            )
+            self._mark_entry_order_filled_from_account(holding.symbol, now)
+
+        self.state.positions = updated_positions
 
     async def _apply_candidate_decision(
         self,
@@ -524,12 +568,53 @@ class SignalEngine:
         total_pnl = total_realized + total_unrealized
         self.state.session.daily_loss_krw = abs(total_pnl) if total_pnl < 0 else 0
 
+    def _calculate_account_stop_price(self, avg_price: int, preserved_stop_price: int | None) -> int:
+        """Calculate a stop price for account-synced positions."""
+
+        fixed_stop = max(min(int(avg_price * (1 - self.config.risk.stop_loss_pct)), avg_price - 1), 1)
+        if preserved_stop_price and 0 < preserved_stop_price < avg_price:
+            return max(fixed_stop, preserved_stop_price)
+        return fixed_stop
+
+    def _calculate_account_target_price(self, avg_price: int) -> int:
+        """Calculate the fixed take-profit target for account-synced positions."""
+
+        return max(int(round(avg_price * (1 + self.config.risk.take_profit_pct))), avg_price + 1)
+
+    def _resolve_account_opened_at(
+        self,
+        symbol: str,
+        previous: PositionState | None,
+        default_time,
+    ):
+        """Keep the original open time when possible, otherwise fall back to the buy order time."""
+
+        if previous is not None:
+            return previous.opened_at
+        for intent in self.state.orders:
+            if intent.symbol == symbol and intent.side == "buy":
+                return intent.created_at
+        return default_time
+
+    def _mark_entry_order_filled_from_account(self, symbol: str, updated_at) -> None:
+        """Reflect that a submitted buy order became a live holding in the mock account."""
+
+        for signal in self.state.signals:
+            if signal.symbol == symbol and signal.signal_type == "entry" and signal.status == "ordered":
+                signal.status = "filled"
+                signal.updated_at = updated_at
+                break
+        for intent in self.state.orders:
+            if intent.symbol == symbol and intent.side == "buy" and intent.state == "submitted":
+                intent.state = "filled"
+                intent.updated_at = updated_at
+                break
+
     def _has_open_signal(self, symbol: str, signal_type: str) -> bool:
         for signal in self.state.signals:
             if signal.symbol == symbol and signal.signal_type == signal_type and signal.status in {
                 "queued",
                 "ordered",
-                "filled",
             }:
                 return True
         return False

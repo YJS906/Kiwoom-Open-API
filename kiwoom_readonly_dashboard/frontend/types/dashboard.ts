@@ -246,6 +246,7 @@ export type SessionConfig = {
   timezone: string;
   market_open_time: string;
   market_close_time: string;
+  manage_overnight_positions_on_open: boolean;
 };
 
 export type AdminConfig = {
@@ -412,6 +413,8 @@ export type StrategySessionState = {
   halt_reason?: string | null;
   recent_stop_loss_symbols: string[];
   cooldown_until: Record<string, string>;
+  pending_overnight_symbols: string[];
+  last_open_management_date?: string | null;
   last_scan_at?: string | null;
   last_signal_at?: string | null;
   last_order_at?: string | null;

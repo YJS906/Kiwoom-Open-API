@@ -106,6 +106,7 @@ class SessionConfig(BaseModel):
     timezone: str = "Asia/Seoul"
     market_open_time: str = "09:05"
     market_close_time: str = "15:20"
+    manage_overnight_positions_on_open: bool = True
 
 
 class AdminConfig(BaseModel):
@@ -296,6 +297,8 @@ class SessionState(BaseModel):
     halt_reason: str | None = None
     recent_stop_loss_symbols: list[str] = Field(default_factory=list)
     cooldown_until: dict[str, str] = Field(default_factory=dict)
+    pending_overnight_symbols: list[str] = Field(default_factory=list)
+    last_open_management_date: str | None = None
     last_scan_at: datetime | None = None
     last_signal_at: datetime | None = None
     last_order_at: datetime | None = None

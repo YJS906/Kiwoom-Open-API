@@ -162,8 +162,13 @@ def make_trigger_bars() -> list[TradeBar]:
 
 
 class StubKiwoomClient:
-    def __init__(self, holdings: list[HoldingItem] | None = None) -> None:
+    def __init__(
+        self,
+        holdings: list[HoldingItem] | None = None,
+        quote_prices: dict[str, int] | None = None,
+    ) -> None:
         self._holdings = holdings or []
+        self._quote_prices = quote_prices or {}
 
     async def get_account_summary(self) -> AccountSummary:
         return AccountSummary(
@@ -180,17 +185,19 @@ class StubKiwoomClient:
         return type("Holdings", (), {"items": self._holdings})()
 
     async def get_stock_quote(self, symbol: str) -> StockQuote:
+        current_price = self._quote_prices.get(symbol, 151)
+        previous_close = max(current_price - 2, 1)
         return StockQuote(
             symbol=symbol,
             name="Samsung Electronics",
-            current_price=151,
-            previous_close=149,
-            diff_from_previous_close=2,
+            current_price=current_price,
+            previous_close=previous_close,
+            diff_from_previous_close=current_price - previous_close,
             change_rate=1.2,
             volume=100_000,
-            open_price=149,
-            high_price=152,
-            low_price=148,
+            open_price=previous_close,
+            high_price=current_price + 1,
+            low_price=max(current_price - 3, 1),
             updated_at=datetime(2026, 4, 2, 10, 0, tzinfo=SEOUL),
         )
 
@@ -379,7 +386,10 @@ async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_
         logger,
         monkeypatch,
         config=config,
-        kiwoom_client=StubKiwoomClient(holdings=[holding]),
+        kiwoom_client=StubKiwoomClient(
+            holdings=[holding],
+            quote_prices={"005930": 1045},
+        ),
         scanner=StubScanner(last_price=1045, change_rate=4.5),
     )
 
@@ -392,6 +402,52 @@ async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_
     assert position.stop_price == 970
     assert any(
         signal.symbol == "005930"
+        and signal.signal_type == "exit"
+        and signal.explanation == "Take-profit level was reached."
+        for signal in snapshot.queued_signals
+    )
+
+
+async def test_signal_engine_checks_overnight_positions_first_on_new_trade_date(
+    settings,
+    logger,
+    monkeypatch,
+) -> None:
+    config = TradingConfig()
+    config.execution.paper_trading = False
+    config.execution.auto_buy_enabled = False
+    config.risk.take_profit_pct = 0.04
+    holding = HoldingItem(
+        symbol="085660",
+        name="Cha Bio Tech",
+        quantity=5,
+        available_quantity=5,
+        average_price=1000,
+        current_price=1010,
+        evaluation_profit_loss=50,
+        profit_rate=1.0,
+        market_name="KOSDAQ",
+    )
+    engine = build_engine(
+        settings,
+        logger,
+        monkeypatch,
+        config=config,
+        kiwoom_client=StubKiwoomClient(
+            holdings=[holding],
+            quote_prices={"085660": 1042},
+        ),
+    )
+    engine.state.session.trade_date = "20260401"
+
+    snapshot = await engine.refresh_now()
+
+    assert "085660" in engine.state.positions
+    assert engine.state.positions["085660"].current_price == 1042
+    assert engine.state.session.pending_overnight_symbols == []
+    assert engine.state.session.last_open_management_date == engine.state.session.trade_date
+    assert any(
+        signal.symbol == "085660"
         and signal.signal_type == "exit"
         and signal.explanation == "Take-profit level was reached."
         for signal in snapshot.queued_signals

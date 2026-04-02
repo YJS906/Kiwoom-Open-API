@@ -68,6 +68,7 @@ session:
   timezone: "Asia/Seoul"
   market_open_time: "09:05"
   market_close_time: "15:20"
+  manage_overnight_positions_on_open: true
 
 admin:
   enable_runtime_overrides: true

@@ -255,6 +255,7 @@ class SignalEngine:
         holdings_response = await self.kiwoom_client.get_holdings()
         self._prepare_session(summary, holdings_response.items)
         self._sync_account_positions(holdings_response.items)
+        await self._manage_overnight_positions_on_open()
 
         refreshed_candidates = await self.scanner.refresh(self.state.candidates)
         quotes_for_positions: dict[str, int] = {}
@@ -337,6 +338,7 @@ class SignalEngine:
                 can_enter_new_positions=self.session_guard.can_enter_new_positions(
                     self.config.risk.no_new_entry_after
                 ),
+                pending_overnight_symbols=[holding.symbol for holding in holdings if holding.quantity > 0],
                 updated_at=now,
             )
             return
@@ -351,6 +353,52 @@ class SignalEngine:
         if session.paper_cash_balance_krw <= 0:
             session.paper_cash_balance_krw = summary.deposit
         session.updated_at = now
+
+    async def _manage_overnight_positions_on_open(self) -> None:
+        """Check overnight holdings as soon as the new trading session opens."""
+
+        if self.config.execution.paper_trading:
+            return
+        if not self.config.session.manage_overnight_positions_on_open:
+            return
+
+        session = self.state.session
+        if not session.market_open:
+            return
+        if session.last_open_management_date == session.trade_date:
+            return
+
+        overnight_symbols = [
+            symbol
+            for symbol in session.pending_overnight_symbols
+            if symbol in self.state.positions
+        ]
+        if not overnight_symbols:
+            session.last_open_management_date = session.trade_date
+            session.pending_overnight_symbols = []
+            return
+
+        open_quotes: dict[str, int] = {}
+        for symbol in overnight_symbols:
+            try:
+                quote = await self.kiwoom_client.get_stock_quote(symbol)
+            except Exception as exc:
+                self.logger.warning(
+                    "Opening quote fetch failed for overnight position %s: %s",
+                    symbol,
+                    exc,
+                )
+                continue
+            if quote.current_price > 0:
+                open_quotes[symbol] = quote.current_price
+
+        if open_quotes:
+            self.state.positions = self.position_manager.mark_to_market(self.state.positions, open_quotes)
+
+        await self._evaluate_exit_signals(symbols=set(overnight_symbols))
+        session.last_open_management_date = session.trade_date
+        session.pending_overnight_symbols = []
+        session.updated_at = now_kr()
 
     def _sync_account_positions(self, holdings: list[HoldingItem]) -> None:
         """Mirror actual Kiwoom account holdings into runtime positions for exit logic."""
@@ -447,8 +495,10 @@ class SignalEngine:
         current.blocked_reason = None if risk.allowed else "; ".join(risk.reasons)
         return current
 
-    async def _evaluate_exit_signals(self) -> None:
+    async def _evaluate_exit_signals(self, symbols: set[str] | None = None) -> None:
         for symbol, position in list(self.state.positions.items()):
+            if symbols is not None and symbol not in symbols:
+                continue
             current_price = position.current_price
             reason: str | None = None
             if position.stop_price and current_price <= position.stop_price:

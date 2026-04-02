@@ -12,6 +12,7 @@ import { HoldingsTable } from "@/components/holdings-table";
 import { NewsPanel } from "@/components/news-panel";
 import { OrderLogPanel } from "@/components/order-log-panel";
 import { OrderbookPanel } from "@/components/orderbook-panel";
+import { RealtimeHigh52Panel } from "@/components/realtime-high52-panel";
 import { SignalQueuePanel } from "@/components/signal-queue-panel";
 import { StatusBar } from "@/components/status-bar";
 import { StockHeader } from "@/components/stock-header";
@@ -30,6 +31,7 @@ import type {
   HoldingItem,
   NewsResponse,
   OrderbookSnapshot,
+  RealtimeHigh52Response,
   RealtimeEnvelope,
   StatusPanel,
   StockDetailResponse,
@@ -45,6 +47,7 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState<AccountSummaryType | null>(null);
   const [holdings, setHoldings] = useState<HoldingItem[]>([]);
   const [status, setStatus] = useState<StatusPanel | null>(null);
+  const [realtimeHigh52, setRealtimeHigh52] = useState<RealtimeHigh52Response | null>(null);
   const [detail, setDetail] = useState<StockDetailResponse | null>(null);
   const [news, setNews] = useState<NewsResponse | null>(null);
   const [strategySnapshot, setStrategySnapshot] = useState<StrategyDashboardSnapshot | null>(null);
@@ -84,20 +87,23 @@ export default function DashboardPage() {
 
     const loadOverview = async () => {
       try {
-        const [summaryResponse, holdingsResponse, statusResponse, scannerResponse] = await Promise.all([
+        const [summaryResponse, holdingsResponse, statusResponse, scannerResponse, high52Response] = await Promise.all([
           dashboardApi.getSummary(),
           dashboardApi.getHoldings(),
           dashboardApi.getStatus(),
-          dashboardApi.getScannerOverview()
+          dashboardApi.getScannerOverview(),
+          dashboardApi.getRealtimeHigh52()
         ]);
         if (!active) return;
         setSummary(summaryResponse);
         setHoldings(holdingsResponse.items);
         setStatus(statusResponse);
         setStrategySnapshot(scannerResponse);
+        setRealtimeHigh52(high52Response);
         setSelectedSymbol(
           (current) =>
             current ??
+            high52Response.items[0]?.symbol ??
             holdingsResponse.items[0]?.symbol ??
             scannerResponse.candidates[0]?.symbol ??
             DEFAULT_SYMBOL
@@ -297,6 +303,11 @@ export default function DashboardPage() {
                 setWatchlist((current) => current.filter((item) => item !== symbol))
               }
             />
+            <RealtimeHigh52Panel
+              snapshot={realtimeHigh52}
+              selectedSymbol={selectedSymbol}
+              onSelect={setSelectedSymbol}
+            />
             <High52CandidatesPanel
               items={strategySnapshot?.candidates ?? []}
               source={strategySnapshot?.scanner_source ?? null}
@@ -336,6 +347,7 @@ export default function DashboardPage() {
                   paper_trading: true,
                   auto_buy_enabled: false,
                   use_mock_only: true,
+                  mock_order_enabled: false,
                   real_order_enabled: false,
                   order_type: "market",
                   slippage_bps: 10,

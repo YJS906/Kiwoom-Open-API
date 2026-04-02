@@ -17,6 +17,10 @@ def settings() -> Settings:
         KIWOOM_APP_KEY="test-app-key",
         KIWOOM_SECRET_KEY="test-secret-key",
         KIWOOM_ACCOUNT_NO="1234567890",
+        KIWOOM_ENV="mock",
+        KIWOOM_MARKET_ENV="mock",
+        KIWOOM_MARKET_APP_KEY="",
+        KIWOOM_MARKET_SECRET_KEY="",
         NAVER_CLIENT_ID="",
         NAVER_CLIENT_SECRET="",
     )

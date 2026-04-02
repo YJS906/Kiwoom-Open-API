@@ -30,9 +30,24 @@ class AccessToken:
 class KiwoomAuthService:
     """Issue and cache Kiwoom OAuth tokens."""
 
-    def __init__(self, settings: Settings, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        logger: logging.Logger,
+        *,
+        service_name: str = "kiwoom",
+        rest_base_url: str | None = None,
+        app_key: str | None = None,
+        secret_key: str | None = None,
+        token_cache_file: Path | None = None,
+    ) -> None:
         self.settings = settings
         self.logger = logger.getChild("kiwoom_auth")
+        self.service_name = service_name
+        self.rest_base_url = rest_base_url or settings.kiwoom_rest_base_url
+        self.app_key = app_key or settings.kiwoom_app_key
+        self.secret_key = secret_key or settings.kiwoom_secret_key
+        self.token_cache_file = token_cache_file or settings.token_cache_file
         self.last_error: str | None = None
         self.last_updated_at: datetime | None = None
         self._cached_token: AccessToken | None = None
@@ -59,10 +74,10 @@ class KiwoomAuthService:
 
         payload = {
             "grant_type": "client_credentials",
-            "appkey": self.settings.kiwoom_app_key,
-            "secretkey": self.settings.kiwoom_secret_key,
+            "appkey": self.app_key,
+            "secretkey": self.secret_key,
         }
-        url = f"{self.settings.kiwoom_rest_base_url}/oauth2/token"
+        url = f"{self.rest_base_url}/oauth2/token"
         async with httpx.AsyncClient(timeout=self.settings.kiwoom_timeout_seconds) as client:
             try:
                 response = await client.post(url, json=payload)
@@ -83,7 +98,7 @@ class KiwoomAuthService:
             raise KiwoomAuthError(self.last_error)
 
         expires_at = datetime.strptime(data["expires_dt"], "%Y%m%d%H%M%S").replace(tzinfo=SEOUL_TZ)
-        self.logger.info("Issued a new Kiwoom access token.")
+        self.logger.info("Issued a new Kiwoom access token for %s.", self.service_name)
         return AccessToken(
             token=data["token"],
             token_type=data.get("token_type", "Bearer"),
@@ -96,7 +111,7 @@ class KiwoomAuthService:
         if self._cached_token and self._cached_token.expires_at > datetime.now(SEOUL_TZ):
             return self._cached_token
 
-        path = Path(self.settings.token_cache_file)
+        path = Path(self.token_cache_file)
         if not path.exists():
             return None
 
@@ -114,7 +129,7 @@ class KiwoomAuthService:
     def _save_token(self, token: AccessToken) -> None:
         """Persist a token to disk."""
 
-        path = Path(self.settings.token_cache_file)
+        path = Path(self.token_cache_file)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(

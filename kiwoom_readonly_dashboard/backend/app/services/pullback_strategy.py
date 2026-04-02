@@ -47,7 +47,7 @@ class PullbackStrategyEngine:
         """Evaluate the pullback strategy and return a detailed decision."""
 
         minimum_daily = max(self.config.daily_ma_slow + 5, self.config.min_daily_bars)
-        if len(daily_bars) < minimum_daily or len(bars_60m) < self.config.min_intraday_bars:
+        if len(daily_bars) < minimum_daily:
             return StrategyDecision(
                 symbol=symbol,
                 passed=False,
@@ -55,6 +55,22 @@ class PullbackStrategyEngine:
                 summary="Not enough history to evaluate the strategy safely.",
                 reasons=[
                     f"daily_bars={len(daily_bars)} required>={minimum_daily}",
+                ],
+            )
+
+        if self.config.strategy_profile == "high52_breakout":
+            return self._evaluate_high52_breakout_strategy(symbol, daily_bars)
+
+        if self.config.strategy_profile == "box_breakout":
+            return self._evaluate_box_breakout_strategy(symbol, daily_bars)
+
+        if len(bars_60m) < self.config.min_intraday_bars:
+            return StrategyDecision(
+                symbol=symbol,
+                passed=False,
+                stage="insufficient_data",
+                summary="Not enough intraday history to evaluate the pullback strategy safely.",
+                reasons=[
                     f"bars_60m={len(bars_60m)} required>={self.config.min_intraday_bars}",
                 ],
             )
@@ -169,6 +185,188 @@ class PullbackStrategyEngine:
                 "vwap": trigger.vwap,
                 "bullish_reversal": trigger.bullish_reversal,
             },
+        )
+
+    def _evaluate_high52_breakout_strategy(
+        self,
+        symbol: str,
+        daily_bars: list[TradeBar],
+    ) -> StrategyDecision:
+        """Evaluate a simpler 52-week breakout continuation profile."""
+
+        daily_filter = self._evaluate_daily_filter(daily_bars)
+        if not daily_filter["passed"]:
+            return StrategyDecision(
+                symbol=symbol,
+                passed=False,
+                stage="daily_filter",
+                summary="The 52-week breakout profile did not pass the daily trend filter.",
+                reasons=daily_filter["reasons"],
+                breakout_price=to_int_or_none(daily_filter.get("breakout_price")),
+                metrics=daily_filter,
+            )
+
+        latest = daily_bars[-1]
+        breakout_price = to_int_or_none(daily_filter.get("breakout_price")) or latest.high
+        threshold = int(breakout_price * (1 - self.config.breakout_entry_buffer_pct))
+        if latest.close < threshold:
+            return StrategyDecision(
+                symbol=symbol,
+                passed=False,
+                stage="trigger",
+                summary="The stock is near a 52-week breakout but has not reclaimed the breakout area strongly enough.",
+                reasons=[
+                    f"latest_close={latest.close}",
+                    f"breakout_hold_threshold={threshold}",
+                ],
+                breakout_price=breakout_price,
+                annotations=self._build_annotations(
+                    entry_price=None,
+                    stop_price=None,
+                    target_price=None,
+                    breakout_price=breakout_price,
+                    support_price=to_int_or_none(daily_filter.get("ma_fast")),
+                ),
+                metrics=daily_filter,
+            )
+
+        entry_price = max(latest.close, breakout_price)
+        support_price = to_int_or_none(daily_filter.get("ma_fast"))
+        stop_price = self._calculate_stop_price(entry_price, support_price)
+        risk_per_share = max(entry_price - stop_price, 1)
+        target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
+        return StrategyDecision(
+            symbol=symbol,
+            passed=True,
+            stage="buy_signal",
+            summary="The 52-week breakout continuation profile is active.",
+            reasons=[
+                "Close is above the fast moving average.",
+                "Fast moving average is above the slow moving average.",
+                "A recent 52-week breakout with strong volume was confirmed.",
+                "Price is still holding above the breakout zone.",
+            ],
+            entry_timeframe="daily",
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            breakout_price=breakout_price,
+            annotations=self._build_annotations(
+                entry_price=entry_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                breakout_price=breakout_price,
+                support_price=support_price,
+            ),
+            metrics=daily_filter,
+        )
+
+    def _evaluate_box_breakout_strategy(
+        self,
+        symbol: str,
+        daily_bars: list[TradeBar],
+    ) -> StrategyDecision:
+        """Evaluate a Darvas-like box breakout profile on daily bars."""
+
+        minimum_bars = max(
+            self.config.daily_ma_slow + 5,
+            self.config.box_window_days + 2,
+            self.config.min_daily_bars,
+        )
+        if len(daily_bars) < minimum_bars:
+            return StrategyDecision(
+                symbol=symbol,
+                passed=False,
+                stage="insufficient_data",
+                summary="Not enough history to evaluate the box-breakout profile safely.",
+                reasons=[f"daily_bars={len(daily_bars)} required>={minimum_bars}"],
+            )
+
+        closes = [bar.close for bar in daily_bars]
+        ma_fast = moving_average(closes, self.config.daily_ma_fast)
+        ma_slow = moving_average(closes, self.config.daily_ma_slow)
+        latest = daily_bars[-1]
+        box_window = daily_bars[-self.config.box_window_days - 1 : -1]
+        box_high = max(bar.high for bar in box_window)
+        box_low = min(bar.low for bar in box_window)
+        box_range_pct = ((box_high - box_low) / box_low) if box_low else 0.0
+        avg_volume = average([bar.volume for bar in box_window])
+        volume_ratio = (latest.volume / avg_volume) if avg_volume else 0.0
+        breakout_threshold = int(box_high * (1 + self.config.box_breakout_buffer_pct))
+
+        reasons: list[str] = []
+        passed = True
+        if latest.close <= ma_fast:
+            passed = False
+            reasons.append("Close is not above the fast moving average.")
+        if ma_fast <= ma_slow:
+            passed = False
+            reasons.append("Fast moving average is not above the slow moving average.")
+        if box_range_pct > self.config.box_max_range_pct:
+            passed = False
+            reasons.append("The recent box range is too wide to qualify as a tight consolidation.")
+        if latest.close < breakout_threshold:
+            passed = False
+            reasons.append("Price has not broken above the recent box high.")
+        if volume_ratio < self.config.box_breakout_volume_multiplier:
+            passed = False
+            reasons.append("Breakout volume is not strong enough versus the recent box average.")
+
+        metrics = {
+            "ma_fast": ma_fast,
+            "ma_slow": ma_slow,
+            "box_high": box_high,
+            "box_low": box_low,
+            "box_range_pct": box_range_pct,
+            "volume_ratio": volume_ratio,
+            "breakout_threshold": breakout_threshold,
+        }
+        if not passed:
+            return StrategyDecision(
+                symbol=symbol,
+                passed=False,
+                stage="trigger",
+                summary="The box-breakout profile did not confirm yet.",
+                reasons=reasons,
+                breakout_price=box_high,
+                annotations=self._build_annotations(
+                    entry_price=None,
+                    stop_price=None,
+                    target_price=None,
+                    breakout_price=box_high,
+                    support_price=box_low,
+                ),
+                metrics=metrics,
+            )
+
+        entry_price = max(latest.close, breakout_threshold)
+        stop_price = self._calculate_stop_price(entry_price, box_low)
+        risk_per_share = max(entry_price - stop_price, 1)
+        target_price = entry_price + int(risk_per_share * self.risk.take_profit_r_multiple)
+        return StrategyDecision(
+            symbol=symbol,
+            passed=True,
+            stage="buy_signal",
+            summary="The box-breakout profile is active.",
+            reasons=[
+                "A tight daily box formed under resistance.",
+                "Price closed above the box high.",
+                "Breakout volume expanded versus the recent box average.",
+                "The higher-timeframe moving averages still point up.",
+            ],
+            entry_timeframe="daily",
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            breakout_price=box_high,
+            annotations=self._build_annotations(
+                entry_price=entry_price,
+                stop_price=stop_price,
+                target_price=target_price,
+                breakout_price=box_high,
+                support_price=box_low,
+            ),
+            metrics=metrics,
         )
 
     def _evaluate_daily_filter(self, bars: list[TradeBar]) -> dict[str, object]:

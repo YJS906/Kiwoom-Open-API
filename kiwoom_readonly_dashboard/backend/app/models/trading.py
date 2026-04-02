@@ -28,6 +28,9 @@ class ScannerConfig(BaseModel):
     """Config for the 52-week-high scanner."""
 
     condition_name: str = "52주 신고가"
+    source_mode: Literal["condition_first", "realtime_first", "realtime_only"] = "realtime_first"
+    realtime_market: Literal["all", "kospi", "kosdaq"] = "all"
+    max_realtime_candidates: int = 6
     refresh_seconds: int = 45
     candidate_ttl_minutes: int = 240
     min_daily_history: int = 260
@@ -37,6 +40,7 @@ class ScannerConfig(BaseModel):
 class StrategyConfig(BaseModel):
     """Configurable strategy parameters."""
 
+    strategy_profile: Literal["high52_pullback", "high52_breakout", "box_breakout"] = "high52_pullback"
     recent_breakout_days: int = 20
     daily_ma_fast: int = 20
     daily_ma_slow: int = 60
@@ -54,6 +58,11 @@ class StrategyConfig(BaseModel):
     min_intraday_bars: int = 40
     breakout_lookback_bars_60m: int = 18
     rally_window_bars_60m: int = 24
+    breakout_entry_buffer_pct: float = 0.002
+    box_window_days: int = 20
+    box_max_range_pct: float = 0.12
+    box_breakout_volume_multiplier: float = 1.5
+    box_breakout_buffer_pct: float = 0.001
 
 
 class RiskConfig(BaseModel):
@@ -82,6 +91,7 @@ class ExecutionConfig(BaseModel):
     paper_trading: bool = True
     auto_buy_enabled: bool = False
     use_mock_only: bool = True
+    mock_order_enabled: bool = False
     real_order_enabled: bool = False
     order_type: ExecutionOrderType = "market"
     slippage_bps: int = 10

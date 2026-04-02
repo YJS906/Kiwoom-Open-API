@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.models.schemas import OrderbookSnapshot, StockDetailResponse, StockSearchResponse
+from app.models.schemas import (
+    OrderbookSnapshot,
+    RealtimeHigh52Response,
+    StockDetailResponse,
+    StockSearchResponse,
+)
 from app.services.kiwoom_client import KiwoomRequestError, now_kr
 
 
@@ -26,6 +31,16 @@ async def search_stocks(
         )
     except KiwoomRequestError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/high52/realtime", response_model=RealtimeHigh52Response)
+async def get_realtime_high52(
+    request: Request,
+    market: str = Query(default="all", pattern="^(all|kospi|kosdaq)$"),
+) -> RealtimeHigh52Response:
+    """Return the realtime 52-week-high universe from official ka10016."""
+
+    return await request.app.state.realtime_high52.get_snapshot(market=market)
 
 
 @router.get("/{symbol}", response_model=StockDetailResponse)

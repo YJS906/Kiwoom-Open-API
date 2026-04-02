@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.models.schemas import AccountSummary, HoldingItem, StockQuote, StockSearchItem
-from app.models.trading import CandidateStock, ScannerConfig, TradeBar, TradingConfig
+from app.models.trading import CandidateStock, ScannerConfig, SessionState, TradeBar, TradingConfig
 from app.services.order_executor import OrderExecutor
 from app.services.paper_broker import PaperBroker
 from app.services.position_manager import PositionManager
@@ -224,29 +224,43 @@ class StubScanner:
 
 
 class StubBarBuilder:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def get_bars(self, symbol: str, timeframe: str, limit=None):
+        self.calls.append(timeframe)
+        if timeframe == "daily":
+            return make_daily_bars()
+        if timeframe == "60m":
+            return make_60m_bars()
+        if timeframe in {"15m", "5m"}:
+            return make_trigger_bars()
+        return []
+
     async def get_strategy_bundle(self, symbol: str):
         return {
-            "daily": make_daily_bars(),
-            "60m": make_60m_bars(),
-            "15m": make_trigger_bars(),
-            "5m": make_trigger_bars(),
+            "daily": await self.get_bars(symbol, "daily"),
+            "60m": await self.get_bars(symbol, "60m"),
+            "15m": await self.get_bars(symbol, "15m"),
+            "5m": await self.get_bars(symbol, "5m"),
             "weekly": make_daily_bars()[-20:],
         }
 
 
-def build_engine(settings, logger, monkeypatch) -> SignalEngine:
-    config = TradingConfig()
+def build_engine(settings, logger, monkeypatch, config: TradingConfig | None = None, bar_builder=None) -> SignalEngine:
+    config = config or TradingConfig()
     config.strategy.min_intraday_bars = 20
     config.session.market_open_time = "00:00"
     config.session.market_close_time = "23:59"
     config.risk.no_new_entry_after = "23:59"
     session_guard = SessionGuard(config.session)
+    bar_builder = bar_builder or StubBarBuilder()
     engine = SignalEngine(
         settings,
         config,
         StubKiwoomClient(),
         StubScanner(),
-        StubBarBuilder(),
+        bar_builder,
         PullbackStrategyEngine(config.strategy, config.risk),
         RiskManager(config.risk, session_guard),
         OrderExecutor(settings, config.execution, StubKiwoomClient(), PaperBroker(), logger),
@@ -260,6 +274,7 @@ def build_engine(settings, logger, monkeypatch) -> SignalEngine:
     engine.state.orders = []
     engine.state.fills = []
     engine.state.positions = {}
+    engine.state.session = SessionState()
     return engine
 
 
@@ -287,3 +302,38 @@ async def test_signal_engine_does_not_duplicate_open_entry_signals(settings, log
 
     assert len(first.queued_signals) == 1
     assert len(second.queued_signals) == 1
+
+
+async def test_signal_engine_uses_daily_only_bundle_for_breakout_profile(settings, logger, monkeypatch) -> None:
+    config = TradingConfig()
+    config.strategy.strategy_profile = "high52_breakout"
+    config.session.market_open_time = "00:00"
+    config.session.market_close_time = "23:59"
+    config.risk.no_new_entry_after = "23:59"
+    bar_builder = StubBarBuilder()
+    engine = build_engine(settings, logger, monkeypatch, config=config, bar_builder=bar_builder)
+
+    snapshot = await engine.refresh_now()
+
+    assert len(snapshot.queued_signals) == 1
+    assert bar_builder.calls == ["daily"]
+
+
+async def test_signal_engine_resets_paper_state_before_mock_order_mode(settings, logger, monkeypatch) -> None:
+    config = TradingConfig()
+    config.execution.auto_buy_enabled = True
+    engine = build_engine(settings, logger, monkeypatch, config=config)
+    await engine.refresh_now()
+
+    assert engine.state.positions
+    assert engine.state.orders
+    assert engine.state.fills
+
+    engine._reset_paper_runtime_state()  # noqa: SLF001
+
+    assert engine.state.positions == {}
+    assert engine.state.orders == []
+    assert engine.state.fills == []
+    assert engine.state.signals == []
+    assert engine.state.session.paper_cash_balance_krw == 0
+    assert engine.state.session.daily_new_entries == 0

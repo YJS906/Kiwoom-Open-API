@@ -20,10 +20,16 @@ export function StrategyParamsPanel({ snapshot }: { snapshot: StrategyDashboardS
       ) : (
         <div className="space-y-4 text-sm">
           <div className="grid grid-cols-2 gap-3">
+            <Metric label="Profile" value={snapshot.config.strategy.strategy_profile} />
             <Metric label="Condition" value={snapshot.config.scanner.condition_name} />
             <Metric label="Refresh" value={`${snapshot.config.scanner.refresh_seconds}s`} />
             <Metric label="Trigger TF" value={snapshot.config.strategy.trigger_timeframe} />
             <Metric label="Breakout Vol" value={`${snapshot.config.strategy.breakout_volume_multiplier.toFixed(1)}x`} />
+            <Metric label="Box Window" value={`${snapshot.config.strategy.box_window_days}d`} />
+            <Metric
+              label="Box Range"
+              value={`${(snapshot.config.strategy.box_max_range_pct * 100).toFixed(1)}%`}
+            />
             <Metric label="Support Ref" value={snapshot.config.strategy.support_reference} />
             <Metric
               label="Support Tol"
@@ -37,10 +43,17 @@ export function StrategyParamsPanel({ snapshot }: { snapshot: StrategyDashboardS
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge className={snapshot.config.execution.paper_trading ? "text-success" : "text-danger"}>
-              {snapshot.config.execution.paper_trading ? "PAPER TRADING" : "LIVE MODE"}
+              {snapshot.config.execution.paper_trading
+                ? "PAPER TRADING"
+                : snapshot.config.execution.mock_order_enabled
+                  ? "KIWOOM MOCK ORDER MODE"
+                  : "BROKER MODE"}
             </Badge>
             <Badge>{snapshot.config.execution.auto_buy_enabled ? "AUTO BUY ON" : "AUTO BUY OFF"}</Badge>
             <Badge>{snapshot.config.execution.use_mock_only ? "MOCK ONLY" : "NO MOCK GUARD"}</Badge>
+            <Badge>
+              {snapshot.config.execution.mock_order_enabled ? "MOCK API ORDER ON" : "MOCK API ORDER OFF"}
+            </Badge>
           </div>
         </div>
       )}

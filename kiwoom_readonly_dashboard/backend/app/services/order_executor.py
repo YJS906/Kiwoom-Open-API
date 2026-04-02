@@ -48,10 +48,14 @@ class OrderExecutor:
             intent.updated_at = fill.filled_at
             return ExecutionResult(intent=intent, fill=fill)
 
-        if not self.config.real_order_enabled:
-            raise RuntimeError("Real order execution is disabled by feature flag.")
         if self.config.use_mock_only and self.settings.kiwoom_env != "mock":
-            raise RuntimeError("Real order execution is blocked because KIWOOM_ENV is not mock.")
+            raise RuntimeError("Broker order execution is blocked because KIWOOM_ENV is not mock.")
+
+        if self.settings.kiwoom_env == "mock":
+            if not self.config.mock_order_enabled:
+                raise RuntimeError("Kiwoom mock-order execution is disabled by feature flag.")
+        elif not self.config.real_order_enabled:
+            raise RuntimeError("Real order execution is disabled by feature flag.")
 
         api_id = "kt10000" if intent.side == "buy" else "kt10001"
         trade_type_map = {"market": "3", "limit": "0", "stop_limit": "28"}
@@ -66,11 +70,18 @@ class OrderExecutor:
         result = await self.kiwoom_client._post("/api/dostk/ordr", api_id, body)  # noqa: SLF001
         intent.state = "submitted"
         intent.reason = f"Kiwoom order number: {result.body.get('ord_no', '')}"
-        self.logger.warning(
-            "A real mock order was submitted. symbol=%s qty=%s api_id=%s",
-            intent.symbol,
-            intent.quantity,
-            api_id,
-        )
+        if self.settings.kiwoom_env == "mock":
+            self.logger.warning(
+                "A Kiwoom mock order was submitted. symbol=%s qty=%s api_id=%s",
+                intent.symbol,
+                intent.quantity,
+                api_id,
+            )
+        else:
+            self.logger.warning(
+                "A live order was submitted. symbol=%s qty=%s api_id=%s",
+                intent.symbol,
+                intent.quantity,
+                api_id,
+            )
         return ExecutionResult(intent=intent, fill=None)
-

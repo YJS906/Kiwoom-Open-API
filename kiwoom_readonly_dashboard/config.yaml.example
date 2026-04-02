@@ -1,5 +1,8 @@
 scanner:
   condition_name: "52주 신고가"
+  source_mode: "realtime_first"
+  realtime_market: "all"
+  max_realtime_candidates: 6
   refresh_seconds: 45
   candidate_ttl_minutes: 240
   min_daily_history: 260
@@ -8,6 +11,7 @@ scanner:
     - "000660"
 
 strategy:
+  strategy_profile: "high52_pullback"
   recent_breakout_days: 20
   daily_ma_fast: 20
   daily_ma_slow: 60
@@ -25,6 +29,11 @@ strategy:
   min_intraday_bars: 40
   breakout_lookback_bars_60m: 18
   rally_window_bars_60m: 24
+  breakout_entry_buffer_pct: 0.002
+  box_window_days: 20
+  box_max_range_pct: 0.12
+  box_breakout_volume_multiplier: 1.5
+  box_breakout_buffer_pct: 0.001
 
 risk:
   buy_cash_pct_of_remaining: 0.20
@@ -47,6 +56,7 @@ execution:
   paper_trading: true
   auto_buy_enabled: false
   use_mock_only: true
+  mock_order_enabled: false
   real_order_enabled: false
   order_type: "market"
   slippage_bps: 10

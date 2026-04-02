@@ -6,6 +6,7 @@ import type {
   NewsResponse,
   OrderIntent,
   ReplayResponse,
+  RealtimeHigh52Response,
   StatusPanel,
   StrategyChartSeries,
   StrategyDashboardSnapshot,
@@ -44,6 +45,10 @@ export const dashboardApi = {
     requestJson<StockSearchResponse>(`/api/stocks/search?q=${encodeURIComponent(query)}`),
   getStockDetail: (symbol: string) =>
     requestJson<StockDetailResponse>(`/api/stocks/${symbol}`),
+  getRealtimeHigh52: (market: "all" | "kospi" | "kosdaq" = "all") =>
+    requestJson<RealtimeHigh52Response>(
+      `/api/stocks/high52/realtime?market=${encodeURIComponent(market)}`
+    ),
   getChart: (symbol: string, range: string, interval: string) =>
     requestJson<ChartResponse>(
       `/api/chart/${symbol}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`

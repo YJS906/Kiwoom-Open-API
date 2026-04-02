@@ -93,6 +93,29 @@ export type StockDetailResponse = {
   orderbook?: OrderbookSnapshot | null;
 };
 
+export type RealtimeHigh52Item = {
+  symbol: string;
+  name: string;
+  current_price: number;
+  diff_from_previous_close: number;
+  change_rate: number;
+  volume: number;
+  best_ask?: number | null;
+  best_bid?: number | null;
+  high_price?: number | null;
+  low_price?: number | null;
+  market_name?: string | null;
+};
+
+export type RealtimeHigh52Response = {
+  status: "ok" | "unavailable" | "error";
+  source: string;
+  environment: "mock" | "production";
+  reason?: string | null;
+  items: RealtimeHigh52Item[];
+  updated_at: string;
+};
+
 export type ChartBar = {
   time: string;
   open: number;
@@ -163,6 +186,7 @@ export type ScannerConfig = {
 };
 
 export type StrategyConfig = {
+  strategy_profile: "high52_pullback" | "high52_breakout" | "box_breakout";
   recent_breakout_days: number;
   daily_ma_fast: number;
   daily_ma_slow: number;
@@ -180,6 +204,11 @@ export type StrategyConfig = {
   min_intraday_bars: number;
   breakout_lookback_bars_60m: number;
   rally_window_bars_60m: number;
+  breakout_entry_buffer_pct: number;
+  box_window_days: number;
+  box_max_range_pct: number;
+  box_breakout_volume_multiplier: number;
+  box_breakout_buffer_pct: number;
 };
 
 export type RiskConfig = {
@@ -204,6 +233,7 @@ export type ExecutionConfig = {
   paper_trading: boolean;
   auto_buy_enabled: boolean;
   use_mock_only: boolean;
+  mock_order_enabled: boolean;
   real_order_enabled: boolean;
   order_type: StrategyOrderType;
   slippage_bps: number;

@@ -33,6 +33,7 @@ from app.services.order_executor import OrderExecutor
 from app.services.paper_broker import PaperBroker
 from app.services.position_manager import PositionManager
 from app.services.pullback_strategy import PullbackStrategyEngine
+from app.services.realtime_high52 import RealtimeHigh52Service
 from app.services.risk_manager import RiskManager
 from app.services.session_guard import SessionGuard
 from app.services.signal_engine import SignalEngine
@@ -57,10 +58,25 @@ def create_app(
     kiwoom_client = kiwoom_client or KiwoomClientService(settings, auth_service, cache, logger)
     news_service = news_service or NewsService(settings, cache, logger)
     ws_service = ws_service or KiwoomWebSocketService(settings, auth_service, logger)
+    market_auth_service = None
+    if settings.kiwoom_market_env == "production":
+        if settings.has_dedicated_market_credentials:
+            market_auth_service = KiwoomAuthService(
+                settings,
+                logger,
+                service_name="kiwoom_market",
+                rest_base_url=settings.kiwoom_market_rest_base_url,
+                app_key=settings.kiwoom_market_app_key,
+                secret_key=settings.kiwoom_market_secret_key,
+                token_cache_file=settings.market_token_cache_file,
+            )
+        elif settings.kiwoom_env == "production":
+            market_auth_service = auth_service
+    realtime_high52 = RealtimeHigh52Service(settings, market_auth_service, cache, logger)
     trading_config = load_trading_config(settings)
     session_guard = SessionGuard(trading_config.session)
     condition_search = ConditionSearchService(settings, auth_service, logger, ws_service)
-    scanner = High52Scanner(trading_config.scanner, condition_search, kiwoom_client, logger)
+    scanner = High52Scanner(trading_config.scanner, condition_search, kiwoom_client, realtime_high52, logger)
     bar_builder = BarBuilderService(kiwoom_client, cache, logger)
     paper_broker = PaperBroker()
     position_manager = PositionManager()
@@ -113,6 +129,7 @@ def create_app(
     app.state.kiwoom_client = kiwoom_client
     app.state.news_service = news_service
     app.state.kiwoom_ws = ws_service
+    app.state.realtime_high52 = realtime_high52
     app.state.trading_config = trading_config
     app.state.signal_engine = signal_engine
     app.state.condition_search = condition_search

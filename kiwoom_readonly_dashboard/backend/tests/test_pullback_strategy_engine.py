@@ -152,6 +152,50 @@ def make_trigger_bars() -> list[TradeBar]:
     return bars
 
 
+def make_box_breakout_daily_bars() -> list[TradeBar]:
+    bars: list[TradeBar] = []
+    for index in range(90):
+        close = 100 + index
+        bars.append(
+            TradeBar(
+                timeframe="daily",
+                time=f"2025-04-{(index % 28) + 1:02d}",
+                open=close - 1,
+                high=close + 2,
+                low=close - 2,
+                close=close,
+                volume=1200 + (index % 5) * 30,
+            )
+        )
+
+    box_closes = [188, 189, 190, 189, 190, 191, 190, 191, 190, 191, 190, 191, 190, 191, 190, 191, 190, 191, 190, 191]
+    for index, close in enumerate(box_closes):
+        bars.append(
+            TradeBar(
+                timeframe="daily",
+                time=f"2025-05-{(index % 28) + 1:02d}",
+                open=close - 1,
+                high=192,
+                low=187,
+                close=close,
+                volume=1100 + (index % 3) * 25,
+            )
+        )
+
+    bars.append(
+        TradeBar(
+            timeframe="daily",
+            time="2025-05-21",
+            open=191,
+            high=196,
+            low=190,
+            close=195,
+            volume=3200,
+        )
+    )
+    return bars
+
+
 def test_pullback_strategy_generates_buy_signal() -> None:
     engine = PullbackStrategyEngine(StrategyConfig(min_intraday_bars=20), RiskConfig())
 
@@ -219,3 +263,43 @@ def test_pullback_strategy_blocks_when_support_breaks() -> None:
     assert decision.passed is False
     assert decision.stage == "pullback_filter"
     assert "support" in decision.summary.lower()
+
+
+def test_high52_breakout_profile_generates_buy_signal() -> None:
+    config = StrategyConfig(strategy_profile="high52_breakout", min_intraday_bars=20)
+    engine = PullbackStrategyEngine(config, RiskConfig())
+
+    decision = engine.evaluate(
+        symbol="005930",
+        daily_bars=make_daily_bars(),
+        bars_60m=[],
+        trigger_bars=[],
+    )
+
+    assert decision.passed is True
+    assert decision.stage == "buy_signal"
+    assert decision.entry_timeframe == "daily"
+    assert decision.breakout_price is not None
+
+
+def test_box_breakout_profile_generates_buy_signal() -> None:
+    config = StrategyConfig(
+        strategy_profile="box_breakout",
+        min_daily_bars=60,
+        box_window_days=20,
+        box_max_range_pct=0.05,
+        box_breakout_volume_multiplier=1.5,
+    )
+    engine = PullbackStrategyEngine(config, RiskConfig())
+
+    decision = engine.evaluate(
+        symbol="005930",
+        daily_bars=make_box_breakout_daily_bars(),
+        bars_60m=[],
+        trigger_bars=[],
+    )
+
+    assert decision.passed is True
+    assert decision.stage == "buy_signal"
+    assert decision.entry_timeframe == "daily"
+    assert any(level.kind == "breakout" for level in decision.annotations)

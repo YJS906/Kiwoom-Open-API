@@ -107,6 +107,29 @@ class StockDetailResponse(BaseModel):
     orderbook: OrderbookSnapshot | None = None
 
 
+class RealtimeHigh52Item(BaseModel):
+    symbol: str
+    name: str
+    current_price: int
+    diff_from_previous_close: int
+    change_rate: float
+    volume: int
+    best_ask: int | None = None
+    best_bid: int | None = None
+    high_price: int | None = None
+    low_price: int | None = None
+    market_name: str | None = None
+
+
+class RealtimeHigh52Response(BaseModel):
+    status: Literal["ok", "unavailable", "error"]
+    source: str
+    environment: Literal["mock", "production"]
+    reason: str | None = None
+    items: list[RealtimeHigh52Item]
+    updated_at: datetime
+
+
 class ChartBar(BaseModel):
     time: str
     open: int

@@ -19,23 +19,29 @@ export function AdminSettingsPanel({
   saving: boolean;
 }) {
   const [refreshSeconds, setRefreshSeconds] = useState("45");
+  const [strategyProfile, setStrategyProfile] = useState<
+    "high52_pullback" | "high52_breakout" | "box_breakout"
+  >("high52_pullback");
   const [triggerTimeframe, setTriggerTimeframe] = useState<"15m" | "5m">("15m");
   const [breakoutVolumeMultiplier, setBreakoutVolumeMultiplier] = useState("2.0");
   const [supportReference, setSupportReference] = useState<"breakout" | "ma_fast" | "either" | "both">("either");
   const [supportTolerancePct, setSupportTolerancePct] = useState("0.02");
   const [autoBuyEnabled, setAutoBuyEnabled] = useState(false);
   const [paperTrading, setPaperTrading] = useState(true);
+  const [mockOrderEnabled, setMockOrderEnabled] = useState(false);
   const [orderType, setOrderType] = useState<"market" | "limit" | "stop_limit">("market");
 
   useEffect(() => {
     if (!config) return;
     setRefreshSeconds(String(config.scanner.refresh_seconds));
+    setStrategyProfile(config.strategy.strategy_profile);
     setTriggerTimeframe(config.strategy.trigger_timeframe);
     setBreakoutVolumeMultiplier(String(config.strategy.breakout_volume_multiplier));
     setSupportReference(config.strategy.support_reference);
     setSupportTolerancePct(String(config.strategy.support_tolerance_pct));
     setAutoBuyEnabled(config.execution.auto_buy_enabled);
     setPaperTrading(config.execution.paper_trading);
+    setMockOrderEnabled(config.execution.mock_order_enabled);
     setOrderType(config.execution.order_type);
   }, [config]);
 
@@ -51,6 +57,21 @@ export function AdminSettingsPanel({
       <div className="space-y-4">
         <Field label="Scanner refresh (sec)">
           <Input value={refreshSeconds} onChange={(event) => setRefreshSeconds(event.target.value)} />
+        </Field>
+        <Field label="Strategy profile">
+          <select
+            value={strategyProfile}
+            onChange={(event) =>
+              setStrategyProfile(
+                event.target.value as "high52_pullback" | "high52_breakout" | "box_breakout"
+              )
+            }
+            className="w-full rounded-xl border border-border bg-panelMuted px-3 py-2 text-sm text-text outline-none"
+          >
+            <option value="high52_pullback">high52_pullback</option>
+            <option value="high52_breakout">high52_breakout</option>
+            <option value="box_breakout">box_breakout</option>
+          </select>
         </Field>
         <Field label="Trigger timeframe">
           <select
@@ -115,11 +136,20 @@ export function AdminSettingsPanel({
             onChange={(event) => setPaperTrading(event.target.checked)}
           />
         </label>
+        <label className="flex items-center justify-between rounded-2xl border border-border/70 bg-panelMuted/50 px-4 py-3 text-sm text-text">
+          <span>MOCK_ORDER_ENABLED</span>
+          <input
+            type="checkbox"
+            checked={mockOrderEnabled}
+            onChange={(event) => setMockOrderEnabled(event.target.checked)}
+          />
+        </label>
         <Button
           onClick={() =>
             onSave({
               scanner: { refresh_seconds: Number(refreshSeconds) || 45 },
               strategy: {
+                strategy_profile: strategyProfile,
                 trigger_timeframe: triggerTimeframe,
                 breakout_volume_multiplier: Number(breakoutVolumeMultiplier) || 2.0,
                 support_reference: supportReference,
@@ -128,6 +158,7 @@ export function AdminSettingsPanel({
               execution: {
                 auto_buy_enabled: autoBuyEnabled,
                 paper_trading: paperTrading,
+                mock_order_enabled: mockOrderEnabled,
                 order_type: orderType
               }
             })

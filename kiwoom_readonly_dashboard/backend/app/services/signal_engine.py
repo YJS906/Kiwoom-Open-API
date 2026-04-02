@@ -211,6 +211,7 @@ class SignalEngine:
     async def update_runtime_config(self, patch: AdminConfigPatch) -> TradingConfig:
         """Persist runtime overrides and rebuild the in-memory config."""
 
+        previous_paper_trading = self.config.execution.paper_trading
         merged = save_trading_overrides(self.settings, patch.model_dump(exclude_none=True))
         self.config = merged
         self.strategy = PullbackStrategyEngine(merged.strategy, merged.risk)
@@ -218,6 +219,9 @@ class SignalEngine:
         self.risk_manager = RiskManager(merged.risk, self.session_guard)
         self.order_executor.config = merged.execution
         self.scanner.config = merged.scanner
+        if previous_paper_trading and not merged.execution.paper_trading:
+            self._reset_paper_runtime_state()
+            self._save_state()
         return merged
 
     def get_status(self) -> StrategyStatus:
@@ -255,7 +259,7 @@ class SignalEngine:
         seen_symbols = {candidate.symbol for candidate in refreshed_candidates}
 
         for candidate in refreshed_candidates:
-            bundle = await self.bar_builder.get_strategy_bundle(candidate.symbol)
+            bundle = await self._load_signal_bundle(candidate.symbol)
             decision = self.strategy.evaluate(
                 symbol=candidate.symbol,
                 daily_bars=bundle["daily"],
@@ -281,6 +285,7 @@ class SignalEngine:
         await self._evaluate_exit_signals()
         self.state.session.last_scan_at = now_kr()
         self.state.session.updated_at = now_kr()
+        self.state.session.last_error = None
         self._status = StrategyStatus(
             connected=True,
             status="running",
@@ -289,6 +294,33 @@ class SignalEngine:
         )
         self._trim_state()
         self._save_state()
+
+    async def _load_signal_bundle(self, symbol: str) -> dict[str, list[Any]]:
+        """Load only the timeframes required for the active strategy profile."""
+
+        daily = await self.bar_builder.get_bars(symbol, "daily", limit=260)
+        profile = self.config.strategy.strategy_profile
+        trigger_timeframe = self.config.strategy.trigger_timeframe
+
+        if profile in {"high52_breakout", "box_breakout"}:
+            return {
+                "daily": daily,
+                "60m": [],
+                "15m": [],
+                "5m": [],
+                "weekly": [],
+            }
+
+        bars_60m = await self.bar_builder.get_bars(symbol, "60m", limit=80)
+        trigger_limit = 160 if trigger_timeframe == "15m" else 200
+        trigger_bars = await self.bar_builder.get_bars(symbol, trigger_timeframe, limit=trigger_limit)
+        return {
+            "daily": daily,
+            "60m": bars_60m,
+            "15m": trigger_bars if trigger_timeframe == "15m" else [],
+            "5m": trigger_bars if trigger_timeframe == "5m" else [],
+            "weekly": [],
+        }
 
     def _prepare_session(self, summary: AccountSummary, holdings: list[HoldingItem]) -> None:
         today = self.session_guard.today()
@@ -523,6 +555,31 @@ class SignalEngine:
         self.state.signals = self.state.signals[:100]
         self.state.orders = self.state.orders[:100]
         self.state.fills = self.state.fills[:100]
+
+    def _reset_paper_runtime_state(self) -> None:
+        """Drop paper-only state before switching to actual Kiwoom mock orders."""
+
+        self.logger.warning(
+            "Resetting paper-only runtime state before enabling Kiwoom mock-order execution."
+        )
+        self.state.positions = {
+            symbol: position
+            for symbol, position in self.state.positions.items()
+            if position.source != "paper"
+        }
+        self.state.signals = []
+        self.state.orders = [intent for intent in self.state.orders if not intent.paper]
+        self.state.fills = [fill for fill in self.state.fills if not fill.paper]
+        self.state.session.paper_cash_balance_krw = 0
+        self.state.session.daily_new_entries = 0
+        self.state.session.daily_loss_krw = 0
+        self.state.session.last_signal_at = None
+        self.state.session.last_order_at = None
+        self.state.session.last_error = None
+        for candidate in self.state.candidates.values():
+            if candidate.state in {"signal_ready", "ordered", "blocked"}:
+                candidate.state = "watching"
+                candidate.blocked_reason = None
 
     def _remember_error(self, message: str) -> None:
         self._recent_errors.append(message)

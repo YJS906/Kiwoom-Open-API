@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     kiwoom_app_key: str = Field(alias="KIWOOM_APP_KEY")
     kiwoom_secret_key: str = Field(alias="KIWOOM_SECRET_KEY")
     kiwoom_account_no: str = Field(alias="KIWOOM_ACCOUNT_NO")
+    kiwoom_market_env_override: Literal["mock", "production"] | None = Field(
+        default=None,
+        alias="KIWOOM_MARKET_ENV",
+    )
+    kiwoom_market_app_key: str | None = Field(default=None, alias="KIWOOM_MARKET_APP_KEY")
+    kiwoom_market_secret_key: str | None = Field(default=None, alias="KIWOOM_MARKET_SECRET_KEY")
     kiwoom_timeout_seconds: float = Field(default=15.0, alias="KIWOOM_TIMEOUT_SECONDS")
     kiwoom_min_request_interval_seconds: float = Field(
         default=0.35,
@@ -68,6 +74,7 @@ class Settings(BaseSettings):
     auto_buy_enabled_env: bool | None = Field(default=None, alias="AUTO_BUY_ENABLED")
     paper_trading_env: bool | None = Field(default=None, alias="PAPER_TRADING")
     use_mock_only_env: bool | None = Field(default=None, alias="USE_MOCK_ONLY")
+    mock_order_enabled_env: bool | None = Field(default=None, alias="MOCK_ORDER_ENABLED")
     real_order_enabled_env: bool | None = Field(default=None, alias="REAL_ORDER_ENABLED")
 
     @computed_field  # type: ignore[prop-decorator]
@@ -86,6 +93,18 @@ class Settings(BaseSettings):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def kiwoom_market_env(self) -> Literal["mock", "production"]:
+        return self.kiwoom_market_env_override or self.kiwoom_env
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def kiwoom_market_rest_base_url(self) -> str:
+        if self.kiwoom_market_env == "production":
+            return "https://api.kiwoom.com"
+        return "https://mockapi.kiwoom.com"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def runtime_dir(self) -> Path:
         return ROOT_DIR / "runtime"
 
@@ -98,6 +117,11 @@ class Settings(BaseSettings):
     @property
     def token_cache_file(self) -> Path:
         return self.runtime_dir / f"kiwoom_token_{self.kiwoom_env}.json"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def market_token_cache_file(self) -> Path:
+        return self.runtime_dir / f"kiwoom_token_market_{self.kiwoom_market_env}.json"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -125,6 +149,11 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [self.frontend_origin, "http://127.0.0.1:3000", "http://localhost:3000"]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def has_dedicated_market_credentials(self) -> bool:
+        return bool(self.kiwoom_market_app_key and self.kiwoom_market_secret_key)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +193,8 @@ def load_trading_config(settings: Settings) -> TradingConfig:
         config.execution.paper_trading = settings.paper_trading_env
     if settings.use_mock_only_env is not None:
         config.execution.use_mock_only = settings.use_mock_only_env
+    if settings.mock_order_enabled_env is not None:
+        config.execution.mock_order_enabled = settings.mock_order_enabled_env
     if settings.real_order_enabled_env is not None:
         config.execution.real_order_enabled = settings.real_order_enabled_env
 

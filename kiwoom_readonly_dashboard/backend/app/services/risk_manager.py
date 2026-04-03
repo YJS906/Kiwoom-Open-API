@@ -35,10 +35,13 @@ class RiskManager:
         reasons: list[str] = []
         blocked_category: str | None = None
 
-        remaining_cash = min(
-            account_summary.deposit,
-            session.paper_cash_balance_krw if session.paper_cash_balance_krw > 0 else account_summary.deposit,
-        )
+        session_cash_candidates = [
+            account_summary.orderable_amount,
+            session.paper_cash_balance_krw if session.paper_cash_balance_krw > 0 else account_summary.orderable_amount,
+            session.actual_available_cash_krw if session.actual_available_cash_krw > 0 else account_summary.orderable_amount,
+        ]
+        positive_cash_candidates = [value for value in session_cash_candidates if value > 0]
+        remaining_cash = min(positive_cash_candidates) if positive_cash_candidates else 0
         suggested_cash = int(remaining_cash * self.config.buy_cash_pct_of_remaining)
         position_cap = int(account_summary.estimated_assets * self.config.max_position_pct)
         suggested_cash = max(0, min(suggested_cash, position_cap))
@@ -101,4 +104,3 @@ class RiskManager:
             suggested_order_cash_krw=suggested_cash,
             quantity=max(quantity, 0),
         )
-

@@ -20,6 +20,7 @@ def build_summary() -> AccountSummary:
         total_profit_rate=0.0,
         holdings_count=0,
         deposit=1_000_000,
+        orderable_amount=1_000_000,
         estimated_assets=1_000_000,
         updated_at=datetime(2026, 4, 2, 9, 0, tzinfo=SEOUL),
     )
@@ -146,4 +147,3 @@ def test_risk_manager_blocks_duplicate_symbol() -> None:
 
     assert decision.allowed is False
     assert any("already held" in reason for reason in decision.reasons)
-

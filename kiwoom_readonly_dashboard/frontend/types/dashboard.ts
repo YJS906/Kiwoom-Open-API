@@ -20,6 +20,7 @@ export type AccountSummary = {
   total_profit_rate: number;
   holdings_count: number;
   deposit: number;
+  orderable_amount: number;
   estimated_assets: number;
   updated_at: string;
 };

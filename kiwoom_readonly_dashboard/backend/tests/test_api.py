@@ -23,6 +23,7 @@ class StubKiwoomClient:
             total_profit_rate=5.0,
             holdings_count=1,
             deposit=200_000,
+            orderable_amount=900_000,
             estimated_assets=1_200_000,
             updated_at=self.last_updated_at,
         )

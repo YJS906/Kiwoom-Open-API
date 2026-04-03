@@ -34,6 +34,7 @@ class AccountSummary(BaseModel):
     total_profit_rate: float
     holdings_count: int
     deposit: int
+    orderable_amount: int
     estimated_assets: int
     updated_at: datetime
 

@@ -5,24 +5,65 @@ $backendDir = Join-Path $projectRoot "backend"
 $frontendDir = Join-Path $projectRoot "frontend"
 $backendPython = Join-Path $backendDir ".venv\\Scripts\\python.exe"
 $npmCmd = "C:\Program Files\nodejs\npm.cmd"
+$nextCmd = Join-Path $frontendDir "node_modules\\.bin\\next.cmd"
 $runtimeDir = Join-Path $projectRoot "runtime"
 $backendHealthUrl = "http://127.0.0.1:8000/api/health"
 $dashboardUrl = "http://127.0.0.1:3000/dashboard"
+$frontendBuildLog = Join-Path $runtimeDir "launcher-frontend-build.log"
+$frontendBuildErrLog = Join-Path $runtimeDir "launcher-frontend-build.err.log"
+$frontendOutLog = Join-Path $runtimeDir "launcher-frontend.out.log"
+$frontendErrLog = Join-Path $runtimeDir "launcher-frontend.err.log"
+$backendOutLog = Join-Path $runtimeDir "launcher-backend.out.log"
+$backendErrLog = Join-Path $runtimeDir "launcher-backend.err.log"
+$frontendNextDir = Join-Path $frontendDir ".next"
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
-function Test-PortListening {
+function Stop-AppProcesses {
     param(
         [Parameter(Mandatory = $true)]
-        [int]$Port
+        [string[]]$MatchPatterns
     )
 
-    try {
-        $listener = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen -ErrorAction Stop |
-            Select-Object -First 1
-        return $null -ne $listener
-    } catch {
-        return $false
+    $processes = Get-CimInstance Win32_Process |
+        Where-Object {
+            $commandLine = $_.CommandLine
+            if (-not $commandLine) {
+                return $false
+            }
+            foreach ($pattern in $MatchPatterns) {
+                if ($commandLine -like $pattern) {
+                    return $true
+                }
+            }
+            return $false
+        }
+
+    foreach ($process in $processes) {
+        try {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to stop process $($process.ProcessId): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Stop-PortListeners {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int[]]$Ports
+    )
+
+    foreach ($port in $Ports) {
+        $listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($processId in $listeners) {
+            try {
+                Stop-Process -Id $processId -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "Failed to stop process on port $port (PID $processId): $($_.Exception.Message)"
+            }
+        }
     }
 }
 
@@ -51,42 +92,90 @@ function Wait-HttpReady {
 }
 
 if (-not (Test-Path $backendPython)) {
-    throw "백엔드 가상환경 python.exe를 찾지 못했습니다: $backendPython"
+    throw "Backend virtualenv python.exe was not found: $backendPython"
 }
 
 if (-not (Test-Path $npmCmd)) {
-    throw "npm.cmd를 찾지 못했습니다: $npmCmd"
+    throw "npm.cmd was not found: $npmCmd"
 }
 
-if (-not (Test-PortListening -Port 8000)) {
-    Start-Process `
-        -FilePath $backendPython `
-        -ArgumentList @("-m", "uvicorn", "app.main:create_app", "--factory", "--host", "127.0.0.1", "--port", "8000") `
-        -WorkingDirectory $backendDir `
-        -WindowStyle Minimized `
-        -RedirectStandardOutput (Join-Path $runtimeDir "launcher-backend.out.log") `
-        -RedirectStandardError (Join-Path $runtimeDir "launcher-backend.err.log")
+if (-not (Test-Path $nextCmd)) {
+    throw "next.cmd was not found: $nextCmd"
 }
 
-if (-not (Test-PortListening -Port 3000)) {
-    Start-Process `
-        -FilePath $npmCmd `
-        -ArgumentList @("run", "dev") `
-        -WorkingDirectory $frontendDir `
-        -WindowStyle Minimized `
-        -RedirectStandardOutput (Join-Path $runtimeDir "launcher-frontend.out.log") `
-        -RedirectStandardError (Join-Path $runtimeDir "launcher-frontend.err.log")
+Stop-AppProcesses -MatchPatterns @(
+    "*uvicorn app.main:create_app*--host 127.0.0.1 --port 8000*"
+)
+Stop-AppProcesses -MatchPatterns @(
+    "*kiwoom_readonly_dashboard\\frontend*run dev*",
+    "*kiwoom_readonly_dashboard\\frontend*next* dev*",
+    "*kiwoom_readonly_dashboard\\frontend*next* start*",
+    "*next\\dist\\server\\lib\\start-server.js*kiwoom_readonly_dashboard\\frontend*"
+)
+Stop-PortListeners -Ports @(3000, 8000)
+Start-Sleep -Seconds 2
+
+if (Test-Path -LiteralPath $frontendNextDir) {
+    Remove-Item -LiteralPath $frontendNextDir -Recurse -Force
 }
+
+@(
+    $frontendBuildLog,
+    $frontendBuildErrLog,
+    $frontendOutLog,
+    $frontendErrLog,
+    $backendOutLog,
+    $backendErrLog
+) | ForEach-Object {
+    if (Test-Path -LiteralPath $_) {
+        try {
+            Remove-Item -LiteralPath $_ -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to clear log file $_ : $($_.Exception.Message)"
+        }
+    }
+}
+
+$backendCommand = 'start "" /min cmd /c ""' +
+    $backendPython +
+    '" -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 > "' +
+    $backendOutLog +
+    '" 2> "' +
+    $backendErrLog +
+    '"""'
+Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $backendCommand) -WorkingDirectory $backendDir
+
+$buildResult = Start-Process `
+    -FilePath $npmCmd `
+    -ArgumentList @("run", "build") `
+    -WorkingDirectory $frontendDir `
+    -WindowStyle Minimized `
+    -RedirectStandardOutput $frontendBuildLog `
+    -RedirectStandardError $frontendBuildErrLog `
+    -Wait `
+    -PassThru
+
+if ($buildResult.ExitCode -ne 0) {
+    throw "Frontend build failed. Check logs: $frontendBuildLog / $frontendBuildErrLog"
+}
+
+Start-Process `
+    -FilePath $nextCmd `
+    -ArgumentList @("start", "-H", "127.0.0.1", "-p", "3000") `
+    -WorkingDirectory $frontendDir `
+    -WindowStyle Minimized `
+    -RedirectStandardOutput $frontendOutLog `
+    -RedirectStandardError $frontendErrLog
 
 $backendReady = Wait-HttpReady -Url $backendHealthUrl -RetryCount 40 -DelaySeconds 2
 $frontendReady = Wait-HttpReady -Url $dashboardUrl -RetryCount 60 -DelaySeconds 2
 
 if (-not $backendReady) {
-    Write-Warning "백엔드가 준비되지 않았습니다. 로그를 확인하세요: $(Join-Path $runtimeDir 'launcher-backend.err.log')"
+    throw "Backend did not become ready. Check log: $backendErrLog"
 }
 
 if (-not $frontendReady) {
-    Write-Warning "프론트엔드가 준비되지 않았습니다. 로그를 확인하세요: $(Join-Path $runtimeDir 'launcher-frontend.err.log')"
+    throw "Frontend did not become ready. Check logs: $frontendOutLog / $frontendErrLog"
 }
 
-Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "start", "", $dashboardUrl) | Out-Null
+Start-Process $dashboardUrl | Out-Null

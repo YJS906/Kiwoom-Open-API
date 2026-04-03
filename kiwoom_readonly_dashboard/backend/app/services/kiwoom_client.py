@@ -55,6 +55,7 @@ class AccountSnapshot:
     total_profit_rate: float
     estimated_assets: int
     deposit: int
+    orderable_amount: int
     holdings_rows: list[dict[str, Any]]
     updated_at: datetime
 
@@ -124,6 +125,7 @@ class KiwoomClientService:
                 [row for row in snapshot.holdings_rows if safe_abs_int(row.get("rmnd_qty")) > 0]
             ),
             deposit=snapshot.deposit,
+            orderable_amount=snapshot.orderable_amount,
             estimated_assets=snapshot.estimated_assets,
             updated_at=snapshot.updated_at,
         )
@@ -811,6 +813,7 @@ class KiwoomClientService:
                 total_profit_rate=safe_float(snapshot_result.body.get("tot_prft_rt")),
                 estimated_assets=safe_abs_int(snapshot_result.body.get("prsm_dpst_aset_amt")),
                 deposit=safe_abs_int(deposit_result.body.get("entr")),
+                orderable_amount=self._extract_orderable_amount(deposit_result.body),
                 holdings_rows=snapshot_result.body.get("acnt_evlt_remn_indv_tot", []) or [],
                 updated_at=now_kr(),
             )
@@ -861,6 +864,20 @@ class KiwoomClientService:
             "items": [item.model_dump(mode="json") for item in universe],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _extract_orderable_amount(self, body: dict[str, Any]) -> int:
+        """Pick the best available orderable-cash field from kt00001."""
+
+        candidates = [
+            safe_abs_int(body.get("ord_alow_amt")),
+            safe_abs_int(body.get("d2_pymn_alow_amt")),
+            safe_abs_int(body.get("100stk_ord_alow_amt")),
+            safe_abs_int(body.get("entr")),
+        ]
+        for value in candidates:
+            if value > 0:
+                return value
+        return 0
 
     async def _fetch_kind_stock_universe(self) -> list[StockSearchItem]:
         """Fallback to the official KIND listed-corporation download for search."""

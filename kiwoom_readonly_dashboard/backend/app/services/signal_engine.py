@@ -328,11 +328,12 @@ class SignalEngine:
     def _prepare_session(self, summary: AccountSummary, holdings: list[HoldingItem]) -> None:
         today = self.session_guard.today()
         now = now_kr()
+        available_cash = summary.orderable_amount if summary.orderable_amount > 0 else summary.deposit
         if self.state.session.trade_date != today:
             self.state.session = SessionState(
                 trade_date=today,
-                paper_cash_balance_krw=summary.deposit,
-                actual_available_cash_krw=summary.deposit,
+                paper_cash_balance_krw=available_cash,
+                actual_available_cash_krw=available_cash,
                 actual_holdings_count=len(holdings),
                 market_open=self.session_guard.is_market_open(),
                 can_enter_new_positions=self.session_guard.can_enter_new_positions(
@@ -348,10 +349,14 @@ class SignalEngine:
         session.can_enter_new_positions = self.session_guard.can_enter_new_positions(
             self.config.risk.no_new_entry_after
         )
-        session.actual_available_cash_krw = summary.deposit
+        session.actual_available_cash_krw = available_cash
+        if not self.config.execution.paper_trading:
+            # In Kiwoom mock/live order mode, reuse the actual orderable cash so
+            # legacy paper state does not cap new entries incorrectly.
+            session.paper_cash_balance_krw = available_cash
         session.actual_holdings_count = len(holdings)
         if session.paper_cash_balance_krw <= 0:
-            session.paper_cash_balance_krw = summary.deposit
+            session.paper_cash_balance_krw = available_cash
         session.updated_at = now
 
     async def _manage_overnight_positions_on_open(self) -> None:

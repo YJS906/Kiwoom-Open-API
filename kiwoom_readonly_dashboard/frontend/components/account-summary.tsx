@@ -1,9 +1,16 @@
-import { ArrowDownRight, ArrowUpRight, Coins, Landmark, PieChart, Wallet } from "lucide-react";
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  Coins,
+  Landmark,
+  PieChart,
+  Wallet,
+} from "lucide-react";
 
-import { formatKrw, formatPercent, formatSignedKrw } from "@/lib/format";
-import type { AccountSummary as AccountSummaryType } from "@/types/dashboard";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatKrw, formatPercent, formatSignedKrw } from "@/lib/format";
+import type { AccountSummary as AccountSummaryType } from "@/types/dashboard";
 
 const items = [
   { key: "total_evaluation_amount", label: "총 평가금액", icon: PieChart },
@@ -11,18 +18,19 @@ const items = [
   { key: "total_profit_rate", label: "수익률", icon: ArrowDownRight },
   { key: "holdings_count", label: "보유 종목 수", icon: Coins },
   { key: "deposit", label: "예수금", icon: Wallet },
-  { key: "estimated_assets", label: "추정 자산", icon: Landmark }
+  { key: "orderable_amount", label: "주문가능금액", icon: Wallet },
+  { key: "estimated_assets", label: "추정 자산", icon: Landmark },
 ] as const;
 
 export function AccountSummary({
   summary,
-  loading
+  loading,
 }: {
   summary: AccountSummaryType | null;
   loading: boolean;
 }) {
   return (
-    <section className="grid grid-cols-2 gap-4 xl:grid-cols-6">
+    <section className="grid grid-cols-2 gap-4 xl:grid-cols-7">
       {items.map(({ key, label, icon: Icon }) => (
         <Card key={key} className="p-5">
           <div className="mb-4 flex items-center justify-between">
@@ -36,7 +44,7 @@ export function AccountSummary({
               <div className="text-2xl font-semibold tracking-tight text-text">
                 {renderValue(key, summary)}
               </div>
-              <p className="text-xs text-muted">실시간/캐시 기반 조회 전용</p>
+              <p className="text-xs text-muted">키움 계좌 스냅샷 기준으로 갱신됩니다.</p>
             </div>
           )}
         </Card>
@@ -47,7 +55,7 @@ export function AccountSummary({
 
 function renderValue(
   key: (typeof items)[number]["key"],
-  summary: AccountSummaryType
+  summary: AccountSummaryType,
 ) {
   switch (key) {
     case "total_evaluation_amount":
@@ -60,6 +68,8 @@ function renderValue(
       return `${summary.holdings_count}개`;
     case "deposit":
       return formatKrw(summary.deposit);
+    case "orderable_amount":
+      return formatKrw(summary.orderable_amount);
     case "estimated_assets":
       return formatKrw(summary.estimated_assets);
   }

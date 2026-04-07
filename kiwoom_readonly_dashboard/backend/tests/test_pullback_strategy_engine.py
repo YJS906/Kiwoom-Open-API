@@ -210,8 +210,7 @@ def test_pullback_strategy_generates_buy_signal() -> None:
     assert decision.stage == "buy_signal"
     assert decision.entry_price is not None
     assert decision.stop_price is not None
-    assert decision.target_price is not None
-    assert decision.target_price == max(int(round(decision.entry_price * 1.04)), decision.entry_price + 1)
+    assert decision.target_price is None
     assert any(level.kind == "support" for level in decision.annotations)
 
 

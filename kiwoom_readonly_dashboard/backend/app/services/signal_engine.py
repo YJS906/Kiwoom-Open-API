@@ -438,7 +438,8 @@ class SignalEngine:
                 unrealized_pnl_krw=holding.evaluation_profit_loss,
                 realized_pnl_krw=previous.realized_pnl_krw if previous else 0,
                 stop_price=self._calculate_account_stop_price(holding.average_price, previous.stop_price if previous else None),
-                target_price=self._calculate_account_target_price(holding.average_price),
+                target_price=self._resolve_account_profit_reference_price(holding.symbol, previous),
+                highest_price=max(previous.highest_price if previous and previous.highest_price else 0, holding.current_price),
                 source="account",
                 opened_at=self._resolve_account_opened_at(holding.symbol, previous, now),
                 last_updated_at=now,
@@ -508,8 +509,8 @@ class SignalEngine:
             reason: str | None = None
             if position.stop_price and current_price <= position.stop_price:
                 reason = "Stop-loss level was reached."
-            elif position.target_price and current_price >= position.target_price:
-                reason = "Take-profit level was reached."
+            else:
+                reason = await self._evaluate_profit_take_exit(symbol, position)
             if reason is None or self._has_open_signal(symbol, "exit"):
                 continue
             decision = StrategyDecision(
@@ -631,10 +632,62 @@ class SignalEngine:
             return max(fixed_stop, preserved_stop_price)
         return fixed_stop
 
-    def _calculate_account_target_price(self, avg_price: int) -> int:
-        """Calculate the fixed take-profit target for account-synced positions."""
+    async def _evaluate_profit_take_exit(self, symbol: str, position: PositionState) -> str | None:
+        """Evaluate a trend-following profit exit instead of a fixed-percent target.
 
-        return max(int(round(avg_price * (1 + self.config.risk.take_profit_pct))), avg_price + 1)
+        Source-aligned behavior:
+        - Pullback entries first wait for a return to the prior breakout / prior-high zone.
+        - After that milestone, or immediately for breakout-style entries, the engine
+          exits when the profitable position loses short-term daily trend support.
+        """
+
+        if position.current_price <= position.avg_price:
+            return None
+
+        if (
+            self.config.risk.take_profit_mode == "breakout_retest_trail"
+            and position.target_price
+            and (position.highest_price or position.current_price) < position.target_price
+        ):
+            return None
+
+        ma_days = max(self.config.risk.take_profit_trailing_ma_days, 2)
+        daily_bars = await self.bar_builder.get_bars(symbol, "daily", limit=max(ma_days + 5, 12))
+        if len(daily_bars) < ma_days:
+            return None
+
+        closes = [bar.close for bar in daily_bars]
+        trailing_ma = sum(closes[-ma_days:]) / ma_days
+        buffer_pct = max(self.config.risk.take_profit_trailing_buffer_pct, 0.0)
+        support_candidates = [
+            max(int(round(trailing_ma * (1 - buffer_pct))), 1),
+        ]
+        if self.config.risk.take_profit_mode == "breakout_retest_trail" and position.target_price:
+            support_candidates.append(max(int(round(position.target_price * (1 - buffer_pct))), 1))
+
+        profit_support = max(support_candidates)
+        if position.current_price > profit_support:
+            return None
+
+        if self.config.risk.take_profit_mode == "breakout_retest_trail" and position.target_price:
+            return (
+                f"Profit-protection exit: the price lost the breakout retest / {ma_days}-day support zone."
+            )
+        return f"Trend-following take-profit exit: the price lost the {ma_days}-day moving-average support."
+
+    def _resolve_account_profit_reference_price(
+        self,
+        symbol: str,
+        previous: PositionState | None,
+    ) -> int | None:
+        """Keep the stored profit reference for actual mock-account positions when possible."""
+
+        if previous is not None:
+            return previous.target_price
+        for intent in self.state.orders:
+            if intent.symbol == symbol and intent.side == "buy" and intent.target_price:
+                return intent.target_price
+        return None
 
     def _resolve_account_opened_at(
         self,

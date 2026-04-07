@@ -35,6 +35,7 @@ class PositionManager:
                     unrealized_pnl_krw=0,
                     stop_price=order.stop_price,
                     target_price=order.target_price,
+                    highest_price=fill.price,
                     opened_at=fill.filled_at,
                     last_updated_at=fill.filled_at,
                 )
@@ -49,6 +50,7 @@ class PositionManager:
                 current.last_updated_at = fill.filled_at
                 current.stop_price = order.stop_price or current.stop_price
                 current.target_price = order.target_price or current.target_price
+                current.highest_price = max(current.highest_price or 0, fill.price, current.current_price)
                 updated[symbol] = current
             return updated, realized
 
@@ -86,6 +88,6 @@ class PositionManager:
             position.current_price = price
             position.market_value_krw = price * position.quantity
             position.unrealized_pnl_krw = (price - position.avg_price) * position.quantity
+            position.highest_price = max(position.highest_price or 0, price)
             position.last_updated_at = now_kr()
         return updated
-

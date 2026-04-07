@@ -26,7 +26,11 @@ export function AdminSettingsPanel({
   const [breakoutVolumeMultiplier, setBreakoutVolumeMultiplier] = useState("2.0");
   const [supportReference, setSupportReference] = useState<"breakout" | "ma_fast" | "either" | "both">("either");
   const [supportTolerancePct, setSupportTolerancePct] = useState("0.02");
-  const [takeProfitPct, setTakeProfitPct] = useState("0.04");
+  const [takeProfitMode, setTakeProfitMode] = useState<"breakout_retest_trail" | "trend_ma_trail">(
+    "breakout_retest_trail"
+  );
+  const [takeProfitTrailingMaDays, setTakeProfitTrailingMaDays] = useState("5");
+  const [takeProfitTrailingBufferPct, setTakeProfitTrailingBufferPct] = useState("0.005");
   const [autoBuyEnabled, setAutoBuyEnabled] = useState(false);
   const [paperTrading, setPaperTrading] = useState(true);
   const [mockOrderEnabled, setMockOrderEnabled] = useState(false);
@@ -40,7 +44,9 @@ export function AdminSettingsPanel({
     setBreakoutVolumeMultiplier(String(config.strategy.breakout_volume_multiplier));
     setSupportReference(config.strategy.support_reference);
     setSupportTolerancePct(String(config.strategy.support_tolerance_pct));
-    setTakeProfitPct(String(config.risk.take_profit_pct));
+    setTakeProfitMode(config.risk.take_profit_mode);
+    setTakeProfitTrailingMaDays(String(config.risk.take_profit_trailing_ma_days));
+    setTakeProfitTrailingBufferPct(String(config.risk.take_profit_trailing_buffer_pct));
     setAutoBuyEnabled(config.execution.auto_buy_enabled);
     setPaperTrading(config.execution.paper_trading);
     setMockOrderEnabled(config.execution.mock_order_enabled);
@@ -111,10 +117,28 @@ export function AdminSettingsPanel({
             onChange={(event) => setSupportTolerancePct(event.target.value)}
           />
         </Field>
-        <Field label="Take profit pct">
+        <Field label="Profit exit mode">
+          <select
+            value={takeProfitMode}
+            onChange={(event) =>
+              setTakeProfitMode(event.target.value as "breakout_retest_trail" | "trend_ma_trail")
+            }
+            className="w-full rounded-xl border border-border bg-panelMuted px-3 py-2 text-sm text-text outline-none"
+          >
+            <option value="breakout_retest_trail">breakout_retest_trail</option>
+            <option value="trend_ma_trail">trend_ma_trail</option>
+          </select>
+        </Field>
+        <Field label="Trailing MA days">
           <Input
-            value={takeProfitPct}
-            onChange={(event) => setTakeProfitPct(event.target.value)}
+            value={takeProfitTrailingMaDays}
+            onChange={(event) => setTakeProfitTrailingMaDays(event.target.value)}
+          />
+        </Field>
+        <Field label="Trailing buffer pct">
+          <Input
+            value={takeProfitTrailingBufferPct}
+            onChange={(event) => setTakeProfitTrailingBufferPct(event.target.value)}
           />
         </Field>
         <Field label="Order type">
@@ -164,7 +188,9 @@ export function AdminSettingsPanel({
                 support_tolerance_pct: Number(supportTolerancePct) || 0.02
               },
               risk: {
-                take_profit_pct: Number(takeProfitPct) || 0.04
+                take_profit_mode: takeProfitMode,
+                take_profit_trailing_ma_days: Number(takeProfitTrailingMaDays) || 5,
+                take_profit_trailing_buffer_pct: Number(takeProfitTrailingBufferPct) || 0.005
               },
               execution: {
                 auto_buy_enabled: autoBuyEnabled,

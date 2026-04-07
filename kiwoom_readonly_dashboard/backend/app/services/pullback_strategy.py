@@ -145,7 +145,11 @@ class PullbackStrategyEngine:
         breakout_price = decision_breakout_price
         support_price = pullback.support_price
         stop_price = self._calculate_stop_price(entry_price, support_price)
-        target_price = self._calculate_target_price(entry_price)
+        target_price = self._calculate_profit_reference_price(
+            entry_price=entry_price,
+            breakout_price=breakout_price,
+            strategy_profile="high52_pullback",
+        )
 
         return StrategyDecision(
             symbol=symbol,
@@ -232,7 +236,11 @@ class PullbackStrategyEngine:
         entry_price = max(latest.close, breakout_price)
         support_price = to_int_or_none(daily_filter.get("ma_fast"))
         stop_price = self._calculate_stop_price(entry_price, support_price)
-        target_price = self._calculate_target_price(entry_price)
+        target_price = self._calculate_profit_reference_price(
+            entry_price=entry_price,
+            breakout_price=breakout_price,
+            strategy_profile="high52_breakout",
+        )
         return StrategyDecision(
             symbol=symbol,
             passed=True,
@@ -339,7 +347,11 @@ class PullbackStrategyEngine:
 
         entry_price = max(latest.close, breakout_threshold)
         stop_price = self._calculate_stop_price(entry_price, box_low)
-        target_price = self._calculate_target_price(entry_price)
+        target_price = self._calculate_profit_reference_price(
+            entry_price=entry_price,
+            breakout_price=box_high,
+            strategy_profile="box_breakout",
+        )
         return StrategyDecision(
             symbol=symbol,
             passed=True,
@@ -567,11 +579,27 @@ class PullbackStrategyEngine:
             stop_candidates.append(support_stop)
         return max(stop_candidates)
 
-    def _calculate_target_price(self, entry_price: int) -> int:
-        """Use a fixed take-profit percentage from the entry price."""
+    def _calculate_profit_reference_price(
+        self,
+        *,
+        entry_price: int,
+        breakout_price: int | None,
+        strategy_profile: str,
+    ) -> int | None:
+        """Return the first profit-protection zone used by the exit engine.
 
-        take_profit = max(int(round(entry_price * (1 + self.risk.take_profit_pct))), entry_price + 1)
-        return take_profit
+        The referenced 52-week-high / pullback materials are closer to
+        "retest the prior high, then hold until trend damage" than to a fixed
+        +4% target. We therefore keep a discrete profit reference only for the
+        pullback profile, where a return to the prior breakout zone is a
+        meaningful first milestone.
+        """
+
+        if strategy_profile != "high52_pullback":
+            return None
+        if breakout_price is None or breakout_price <= entry_price:
+            return None
+        return breakout_price
 
     def _evaluate_support_zone(
         self,
@@ -625,7 +653,7 @@ class PullbackStrategyEngine:
         if stop_price is not None:
             annotations.append(PriceLevel(label="Stop", price=stop_price, kind="stop"))
         if target_price is not None:
-            annotations.append(PriceLevel(label="Target", price=target_price, kind="target"))
+            annotations.append(PriceLevel(label="Profit Zone", price=target_price, kind="target"))
         if breakout_price is not None:
             annotations.append(PriceLevel(label="Breakout", price=breakout_price, kind="breakout"))
         if support_price is not None:

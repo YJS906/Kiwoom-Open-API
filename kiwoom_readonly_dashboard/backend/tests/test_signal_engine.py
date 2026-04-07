@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.models.schemas import AccountSummary, HoldingItem, StockQuote, StockSearchItem
-from app.models.trading import CandidateStock, ScannerConfig, SessionState, TradeBar, TradingConfig
+from app.models.trading import CandidateStock, PositionState, ScannerConfig, SessionState, TradeBar, TradingConfig
 from app.services.order_executor import OrderExecutor
 from app.services.paper_broker import PaperBroker
 from app.services.position_manager import PositionManager
@@ -362,7 +362,7 @@ async def test_signal_engine_resets_paper_state_before_mock_order_mode(settings,
     assert engine.state.session.daily_new_entries == 0
 
 
-async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_exit(
+async def test_signal_engine_syncs_mock_account_holding_and_preserves_profit_reference_zone(
     settings,
     logger,
     monkeypatch,
@@ -370,7 +370,6 @@ async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_
     config = TradingConfig()
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
-    config.risk.take_profit_pct = 0.04
     holding = HoldingItem(
         symbol="005930",
         name="Samsung Electronics",
@@ -399,12 +398,61 @@ async def test_signal_engine_syncs_mock_account_holding_and_creates_take_profit_
     assert "005930" in engine.state.positions
     position = engine.state.positions["005930"]
     assert position.source == "account"
-    assert position.target_price == 1040
+    assert position.target_price is None
     assert position.stop_price == 970
+    assert snapshot.queued_signals == []
+
+
+async def test_signal_engine_creates_profit_protection_exit_after_breakout_retest_fails(
+    settings,
+    logger,
+    monkeypatch,
+) -> None:
+    config = TradingConfig()
+    config.execution.paper_trading = False
+    config.execution.auto_buy_enabled = False
+    holding = HoldingItem(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        available_quantity=10,
+        average_price=1000,
+        current_price=1030,
+        evaluation_profit_loss=300,
+        profit_rate=3.0,
+        market_name="KOSPI",
+    )
+    engine = build_engine(
+        settings,
+        logger,
+        monkeypatch,
+        config=config,
+        kiwoom_client=StubKiwoomClient(
+            holdings=[holding],
+            quote_prices={"005930": 1030},
+        ),
+        scanner=StubScanner(last_price=1030, change_rate=3.0),
+    )
+    engine.state.positions["005930"] = PositionState(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        avg_price=1000,
+        current_price=1050,
+        market_value_krw=10_500,
+        unrealized_pnl_krw=500,
+        stop_price=970,
+        target_price=1040,
+        highest_price=1050,
+        source="account",
+    )
+
+    snapshot = await engine.refresh_now()
+
     assert any(
         signal.symbol == "005930"
         and signal.signal_type == "exit"
-        and signal.explanation == "Take-profit level was reached."
+        and "Profit-protection exit" in signal.explanation
         for signal in snapshot.queued_signals
     )
 
@@ -417,16 +465,15 @@ async def test_signal_engine_checks_overnight_positions_first_on_new_trade_date(
     config = TradingConfig()
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
-    config.risk.take_profit_pct = 0.04
     holding = HoldingItem(
         symbol="085660",
         name="Cha Bio Tech",
         quantity=5,
         available_quantity=5,
         average_price=1000,
-        current_price=1010,
-        evaluation_profit_loss=50,
-        profit_rate=1.0,
+        current_price=1032,
+        evaluation_profit_loss=160,
+        profit_rate=3.2,
         market_name="KOSDAQ",
     )
     engine = build_engine(
@@ -436,20 +483,33 @@ async def test_signal_engine_checks_overnight_positions_first_on_new_trade_date(
         config=config,
         kiwoom_client=StubKiwoomClient(
             holdings=[holding],
-            quote_prices={"085660": 1042},
+            quote_prices={"085660": 1032},
         ),
+    )
+    engine.state.positions["085660"] = PositionState(
+        symbol="085660",
+        name="Cha Bio Tech",
+        quantity=5,
+        avg_price=1000,
+        current_price=1052,
+        market_value_krw=5_260,
+        unrealized_pnl_krw=260,
+        stop_price=970,
+        target_price=1040,
+        highest_price=1052,
+        source="account",
     )
     engine.state.session.trade_date = "20260401"
 
     snapshot = await engine.refresh_now()
 
     assert "085660" in engine.state.positions
-    assert engine.state.positions["085660"].current_price == 1042
+    assert engine.state.positions["085660"].current_price == 1032
     assert engine.state.session.pending_overnight_symbols == []
     assert engine.state.session.last_open_management_date == engine.state.session.trade_date
     assert any(
         signal.symbol == "085660"
         and signal.signal_type == "exit"
-        and signal.explanation == "Take-profit level was reached."
+        and "Profit-protection exit" in signal.explanation
         for signal in snapshot.queued_signals
     )

@@ -2,8 +2,8 @@ scanner:
   condition_name: "52주 신고가"
   source_mode: "realtime_first"
   realtime_market: "all"
-  max_realtime_candidates: 6
-  refresh_seconds: 45
+  max_realtime_candidates: 4
+  refresh_seconds: 60
   candidate_ttl_minutes: 240
   min_daily_history: 260
   fallback_symbols:
@@ -15,38 +15,38 @@ strategy:
   recent_breakout_days: 20
   daily_ma_fast: 20
   daily_ma_slow: 60
-  breakout_volume_multiplier: 2.0
+  breakout_volume_multiplier: 1.5
   breakout_volume_lookback_days: 20
-  pullback_min_ratio: 0.30
+  pullback_min_ratio: 0.20
   pullback_max_ratio: 0.50
-  volume_dryup_ratio: 0.70
+  volume_dryup_ratio: 1.20
   support_reference: "either"
-  support_tolerance_pct: 0.02
-  trigger_timeframe: "15m"
+  support_tolerance_pct: 0.04
+  trigger_timeframe: "5m"
   use_vwap: true
   require_bullish_reversal_candle: true
   min_daily_bars: 120
   min_intraday_bars: 40
   breakout_lookback_bars_60m: 18
   rally_window_bars_60m: 24
-  breakout_entry_buffer_pct: 0.002
+  breakout_entry_buffer_pct: 0.003
   box_window_days: 20
   box_max_range_pct: 0.12
   box_breakout_volume_multiplier: 1.5
   box_breakout_buffer_pct: 0.001
 
 risk:
-  buy_cash_pct_of_remaining: 0.20
-  max_position_pct: 0.25
-  max_positions: 3
-  max_daily_new_entries: 2
-  max_daily_loss_krw: 50000
+  buy_cash_pct_of_remaining: 0.30
+  max_position_pct: 0.35
+  max_positions: 999
+  max_daily_new_entries: 999
+  max_daily_loss_krw: 100000
   reentry_cooldown_minutes: 120
   stop_loss_pct: 0.03
   take_profit_mode: "breakout_retest_trail"
   take_profit_trailing_ma_days: 5
   take_profit_trailing_buffer_pct: 0.005
-  no_new_entry_after: "14:30"
+  no_new_entry_after: "15:20"
   block_reentry_after_stop: true
   block_high_volatility: true
   max_intraday_change_pct: 18.0
@@ -68,7 +68,7 @@ execution:
 
 session:
   timezone: "Asia/Seoul"
-  market_open_time: "09:05"
+  market_open_time: "09:00"
   market_close_time: "15:20"
   manage_overnight_positions_on_open: true
 

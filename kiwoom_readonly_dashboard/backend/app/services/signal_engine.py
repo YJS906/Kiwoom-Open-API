@@ -428,7 +428,7 @@ class SignalEngine:
                 continue
 
             previous = previous_account_positions.get(holding.symbol)
-            updated_positions[holding.symbol] = PositionState(
+            updated_position = PositionState(
                 symbol=holding.symbol,
                 name=holding.name,
                 quantity=holding.quantity,
@@ -444,7 +444,13 @@ class SignalEngine:
                 opened_at=self._resolve_account_opened_at(holding.symbol, previous, now),
                 last_updated_at=now,
             )
+            updated_positions[holding.symbol] = updated_position
             self._mark_entry_order_filled_from_account(holding.symbol, now)
+            self._close_stale_exit_artifacts(
+                holding.symbol,
+                updated_position.opened_at,
+                now,
+            )
 
         self.state.positions = updated_positions
 
@@ -718,12 +724,47 @@ class SignalEngine:
                 intent.updated_at = updated_at
                 break
 
+    def _close_stale_exit_artifacts(self, symbol: str, opened_at, updated_at) -> None:
+        """Retire older exit artifacts so a newly reopened position can exit again.
+
+        When a symbol is sold and later re-entered, older exit signals/orders may still be
+        left in the runtime state as `ordered` / `submitted`. Those stale artifacts should
+        not block a fresh stop-loss or take-profit exit for the newer holding cycle.
+        """
+
+        stale_signal_ids: set[str] = set()
+        for signal in self.state.signals:
+            if signal.symbol != symbol or signal.signal_type != "exit":
+                continue
+            if signal.status not in {"queued", "ordered"}:
+                continue
+            if signal.created_at >= opened_at:
+                continue
+            signal.status = "closed"
+            signal.updated_at = updated_at
+            stale_signal_ids.add(signal.id)
+
+        for intent in self.state.orders:
+            if intent.symbol != symbol or intent.side != "sell":
+                continue
+            if intent.state not in {"queued", "submitted"}:
+                continue
+            if intent.signal_id not in stale_signal_ids and intent.created_at >= opened_at:
+                continue
+            intent.state = "cancelled"
+            intent.updated_at = updated_at
+            reason = "Superseded by a newer account-synced holding cycle."
+            intent.reason = f"{intent.reason} | {reason}" if intent.reason else reason
+
     def _has_open_signal(self, symbol: str, signal_type: str) -> bool:
+        position = self.state.positions.get(symbol) if signal_type == "exit" else None
         for signal in self.state.signals:
             if signal.symbol == symbol and signal.signal_type == signal_type and signal.status in {
                 "queued",
                 "ordered",
             }:
+                if position is not None and signal.created_at < position.opened_at:
+                    continue
                 return True
         return False
 

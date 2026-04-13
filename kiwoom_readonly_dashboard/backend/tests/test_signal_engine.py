@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.models.schemas import AccountSummary, HoldingItem, StockQuote, StockSearchItem
-from app.models.trading import CandidateStock, PositionState, ScannerConfig, SessionState, TradeBar, TradingConfig
+from app.models.trading import (
+    CandidateStock,
+    OrderIntent,
+    PositionState,
+    ScannerConfig,
+    SessionState,
+    SignalEvent,
+    StrategyDecision,
+    TradeBar,
+    TradingConfig,
+)
 from app.services.order_executor import OrderExecutor
 from app.services.paper_broker import PaperBroker
 from app.services.position_manager import PositionManager
@@ -513,3 +523,109 @@ async def test_signal_engine_checks_overnight_positions_first_on_new_trade_date(
         and "Profit-protection exit" in signal.explanation
         for signal in snapshot.queued_signals
     )
+
+
+async def test_signal_engine_ignores_stale_exit_signal_from_previous_holding_cycle(
+    settings,
+    logger,
+    monkeypatch,
+) -> None:
+    config = TradingConfig()
+    config.execution.paper_trading = False
+    config.execution.auto_buy_enabled = False
+    opened_at = datetime(2026, 4, 10, 11, 20, 22, tzinfo=SEOUL)
+    stale_exit_time = datetime(2026, 4, 10, 9, 10, 23, tzinfo=SEOUL)
+    holding = HoldingItem(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        available_quantity=10,
+        average_price=1000,
+        current_price=960,
+        evaluation_profit_loss=-400,
+        profit_rate=-4.0,
+        market_name="KOSPI",
+    )
+    engine = build_engine(
+        settings,
+        logger,
+        monkeypatch,
+        config=config,
+        kiwoom_client=StubKiwoomClient(
+            holdings=[holding],
+            quote_prices={"005930": 960},
+        ),
+        scanner=StubScanner(last_price=960, change_rate=-4.0),
+    )
+    engine.state.positions["005930"] = PositionState(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        avg_price=1000,
+        current_price=1005,
+        market_value_krw=10_050,
+        unrealized_pnl_krw=50,
+        stop_price=970,
+        target_price=1040,
+        highest_price=1050,
+        source="account",
+        opened_at=opened_at,
+    )
+    engine.state.signals.append(
+        SignalEvent(
+            id="sig-stale-exit",
+            symbol="005930",
+            name="Samsung Electronics",
+            signal_type="exit",
+            status="ordered",
+            candidate_state="ordered",
+            decision=StrategyDecision(
+                symbol="005930",
+                passed=True,
+                stage="exit_signal",
+                summary="Stop-loss level was reached.",
+                reasons=["Stop-loss level was reached."],
+                entry_price=995,
+                stop_price=970,
+            ),
+            explanation="Stop-loss level was reached.",
+            created_at=stale_exit_time,
+            updated_at=stale_exit_time,
+            order_intent_id="ord-stale-exit",
+        )
+    )
+    engine.state.orders.append(
+        OrderIntent(
+            id="ord-stale-exit",
+            signal_id="sig-stale-exit",
+            symbol="005930",
+            name="Samsung Electronics",
+            side="sell",
+            quantity=12,
+            order_type="market",
+            desired_price=995,
+            stop_price=970,
+            target_price=1040,
+            paper=False,
+            state="submitted",
+            reason="Kiwoom order number: 0000001",
+            created_at=stale_exit_time,
+            updated_at=stale_exit_time,
+        )
+    )
+
+    snapshot = await engine.refresh_now()
+
+    stale_signal = next(signal for signal in engine.state.signals if signal.id == "sig-stale-exit")
+    stale_order = next(order for order in engine.state.orders if order.id == "ord-stale-exit")
+    fresh_exit = next(
+        signal
+        for signal in snapshot.queued_signals
+        if signal.symbol == "005930"
+        and signal.signal_type == "exit"
+        and signal.id != "sig-stale-exit"
+    )
+
+    assert stale_signal.status == "closed"
+    assert stale_order.state == "cancelled"
+    assert fresh_exit.explanation == "Stop-loss level was reached."

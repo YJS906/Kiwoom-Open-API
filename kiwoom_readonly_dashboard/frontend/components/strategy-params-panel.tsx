@@ -42,6 +42,10 @@ export function StrategyParamsPanel({ snapshot }: { snapshot: StrategyDashboardS
               value={snapshot.config.risk.take_profit_mode}
             />
             <Metric
+              label="Take Profit"
+              value={`${((snapshot.config.risk.take_profit_pct ?? 0.05) * 100).toFixed(1)}%`}
+            />
+            <Metric
               label="Trail MA"
               value={`${snapshot.config.risk.take_profit_trailing_ma_days}d`}
             />

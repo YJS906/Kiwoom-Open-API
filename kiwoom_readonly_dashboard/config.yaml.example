@@ -43,9 +43,10 @@ risk:
   max_daily_loss_krw: 100000
   reentry_cooldown_minutes: 120
   stop_loss_pct: 0.03
-  take_profit_mode: "breakout_retest_trail"
-  take_profit_trailing_ma_days: 5
-  take_profit_trailing_buffer_pct: 0.005
+take_profit_mode: "fixed_pct"
+take_profit_pct: 0.05
+take_profit_trailing_ma_days: 5
+take_profit_trailing_buffer_pct: 0.005
   no_new_entry_after: "15:20"
   block_reentry_after_stop: true
   block_high_volatility: true

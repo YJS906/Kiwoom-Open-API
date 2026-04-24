@@ -438,7 +438,11 @@ class SignalEngine:
                 unrealized_pnl_krw=holding.evaluation_profit_loss,
                 realized_pnl_krw=previous.realized_pnl_krw if previous else 0,
                 stop_price=self._calculate_account_stop_price(holding.average_price, previous.stop_price if previous else None),
-                target_price=self._resolve_account_profit_reference_price(holding.symbol, previous),
+                target_price=self._resolve_account_profit_reference_price(
+                    holding.symbol,
+                    holding.average_price,
+                    previous,
+                ),
                 highest_price=max(previous.highest_price if previous and previous.highest_price else 0, holding.current_price),
                 source="account",
                 opened_at=self._resolve_account_opened_at(holding.symbol, previous, now),
@@ -639,15 +643,20 @@ class SignalEngine:
         return fixed_stop
 
     async def _evaluate_profit_take_exit(self, symbol: str, position: PositionState) -> str | None:
-        """Evaluate a trend-following profit exit instead of a fixed-percent target.
-
-        Source-aligned behavior:
-        - Pullback entries first wait for a return to the prior breakout / prior-high zone.
-        - After that milestone, or immediately for breakout-style entries, the engine
-          exits when the profitable position loses short-term daily trend support.
-        """
+        """Evaluate the configured profit-taking rule for an open position."""
 
         if position.current_price <= position.avg_price:
+            return None
+
+        if self.config.risk.take_profit_mode == "fixed_pct":
+            target_price = position.target_price or max(
+                int(round(position.avg_price * (1 + self.config.risk.take_profit_pct))),
+                position.avg_price + 1,
+            )
+            if position.current_price >= target_price:
+                return (
+                    f"Take-profit level was reached: price hit +{self.config.risk.take_profit_pct * 100:.1f}%."
+                )
             return None
 
         if (
@@ -684,10 +693,16 @@ class SignalEngine:
     def _resolve_account_profit_reference_price(
         self,
         symbol: str,
+        avg_price: int,
         previous: PositionState | None,
     ) -> int | None:
         """Keep the stored profit reference for actual mock-account positions when possible."""
 
+        if self.config.risk.take_profit_mode == "fixed_pct":
+            return max(
+                int(round(avg_price * (1 + self.config.risk.take_profit_pct))),
+                avg_price + 1,
+            )
         if previous is not None:
             return previous.target_price
         for intent in self.state.orders:

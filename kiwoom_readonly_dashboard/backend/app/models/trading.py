@@ -75,11 +75,11 @@ class RiskConfig(BaseModel):
     max_daily_loss_krw: int = 50_000
     reentry_cooldown_minutes: int = 120
     stop_loss_pct: float = 0.03
-    take_profit_mode: Literal["breakout_retest_trail", "trend_ma_trail"] = "breakout_retest_trail"
+    take_profit_mode: Literal["fixed_pct", "breakout_retest_trail", "trend_ma_trail"] = "fixed_pct"
     take_profit_trailing_ma_days: int = 5
     take_profit_trailing_buffer_pct: float = 0.005
     # Legacy field kept for runtime-state compatibility. New logic no longer uses it.
-    take_profit_pct: float = 0.04
+    take_profit_pct: float = 0.05
     no_new_entry_after: str = "14:30"
     block_reentry_after_stop: bool = True
     block_high_volatility: bool = True

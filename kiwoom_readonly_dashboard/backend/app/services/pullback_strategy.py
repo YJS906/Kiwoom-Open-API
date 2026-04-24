@@ -586,14 +586,11 @@ class PullbackStrategyEngine:
         breakout_price: int | None,
         strategy_profile: str,
     ) -> int | None:
-        """Return the first profit-protection zone used by the exit engine.
+        """Return the configured profit reference used by the exit engine."""
 
-        The referenced 52-week-high / pullback materials are closer to
-        "retest the prior high, then hold until trend damage" than to a fixed
-        +4% target. We therefore keep a discrete profit reference only for the
-        pullback profile, where a return to the prior breakout zone is a
-        meaningful first milestone.
-        """
+        if self.risk.take_profit_mode == "fixed_pct":
+            fixed_target = max(int(round(entry_price * (1 + self.risk.take_profit_pct))), entry_price + 1)
+            return fixed_target
 
         if strategy_profile != "high52_pullback":
             return None

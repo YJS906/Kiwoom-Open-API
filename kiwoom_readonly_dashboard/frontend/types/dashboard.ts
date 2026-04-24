@@ -220,7 +220,7 @@ export type RiskConfig = {
   max_daily_loss_krw: number;
   reentry_cooldown_minutes: number;
   stop_loss_pct: number;
-  take_profit_mode: "breakout_retest_trail" | "trend_ma_trail";
+  take_profit_mode: "fixed_pct" | "breakout_retest_trail" | "trend_ma_trail";
   take_profit_trailing_ma_days: number;
   take_profit_trailing_buffer_pct: number;
   take_profit_pct?: number;

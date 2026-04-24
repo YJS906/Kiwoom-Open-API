@@ -378,6 +378,7 @@ async def test_signal_engine_syncs_mock_account_holding_and_preserves_profit_ref
     monkeypatch,
 ) -> None:
     config = TradingConfig()
+    config.risk.take_profit_mode = "breakout_retest_trail"
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
     holding = HoldingItem(
@@ -419,6 +420,7 @@ async def test_signal_engine_creates_profit_protection_exit_after_breakout_retes
     monkeypatch,
 ) -> None:
     config = TradingConfig()
+    config.risk.take_profit_mode = "breakout_retest_trail"
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
     holding = HoldingItem(
@@ -473,6 +475,7 @@ async def test_signal_engine_checks_overnight_positions_first_on_new_trade_date(
     monkeypatch,
 ) -> None:
     config = TradingConfig()
+    config.risk.take_profit_mode = "breakout_retest_trail"
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
     holding = HoldingItem(
@@ -531,6 +534,7 @@ async def test_signal_engine_ignores_stale_exit_signal_from_previous_holding_cyc
     monkeypatch,
 ) -> None:
     config = TradingConfig()
+    config.risk.take_profit_mode = "breakout_retest_trail"
     config.execution.paper_trading = False
     config.execution.auto_buy_enabled = False
     opened_at = datetime(2026, 4, 10, 11, 20, 22, tzinfo=SEOUL)
@@ -629,3 +633,48 @@ async def test_signal_engine_ignores_stale_exit_signal_from_previous_holding_cyc
     assert stale_signal.status == "closed"
     assert stale_order.state == "cancelled"
     assert fresh_exit.explanation == "Stop-loss level was reached."
+
+
+async def test_signal_engine_creates_fixed_pct_take_profit_exit(
+    settings,
+    logger,
+    monkeypatch,
+) -> None:
+    config = TradingConfig()
+    config.risk.take_profit_mode = "fixed_pct"
+    config.risk.take_profit_pct = 0.05
+    config.execution.paper_trading = False
+    config.execution.auto_buy_enabled = False
+    holding = HoldingItem(
+        symbol="005930",
+        name="Samsung Electronics",
+        quantity=10,
+        available_quantity=10,
+        average_price=1000,
+        current_price=1055,
+        evaluation_profit_loss=550,
+        profit_rate=5.5,
+        market_name="KOSPI",
+    )
+    engine = build_engine(
+        settings,
+        logger,
+        monkeypatch,
+        config=config,
+        kiwoom_client=StubKiwoomClient(
+            holdings=[holding],
+            quote_prices={"005930": 1055},
+        ),
+        scanner=StubScanner(last_price=1055, change_rate=5.5),
+    )
+
+    snapshot = await engine.refresh_now()
+
+    position = engine.state.positions["005930"]
+    assert position.target_price == 1050
+    assert any(
+        signal.symbol == "005930"
+        and signal.signal_type == "exit"
+        and "Take-profit level was reached" in signal.explanation
+        for signal in snapshot.queued_signals
+    )
